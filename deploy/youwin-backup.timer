@@ -1,0 +1,21 @@
+# /etc/systemd/system/youwin-backup.timer
+#
+#   systemctl enable --now youwin-backup.timer
+#   systemctl list-timers youwin-backup.timer     # confirm the next run
+#   systemctl start youwin-backup.service         # take one now
+
+[Unit]
+Description=Nightly youwin.dev backup and export
+
+[Timer]
+# 03:30 UTC — the server runs on UTC and so does everything the site renders.
+OnCalendar=*-*-* 03:30:00
+# The box is small and shares itself with other services; a fixed minute means
+# every timer on it fires at once.
+RandomizedDelaySec=20m
+# Runs on the next boot if the machine was off when it was due. A backup missed
+# because of a reboot is exactly the backup you end up wanting.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

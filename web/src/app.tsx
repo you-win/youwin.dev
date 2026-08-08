@@ -16,6 +16,7 @@ import Drafts from "./routes/Drafts";
 import Feed from "./routes/Feed";
 import Login from "./routes/Login";
 import Permalink from "./routes/Permalink";
+import Search from "./routes/Search";
 import Settings from "./routes/Settings";
 
 /**
@@ -72,6 +73,7 @@ function Shell(props: RouteSectionProps) {
                 install
               </button>
             </Show>
+            <A href="/search">search</A>
             <A href="/drafts">drafts</A>
             <A href="/settings">settings</A>
             <a
@@ -132,6 +134,7 @@ export default function App() {
     <Router root={Shell}>
       <Route path="/" component={Feed} />
       <Route path="/p/:id" component={Permalink} />
+      <Route path="/search" component={Search} />
       <Route path="/drafts" component={Drafts} />
       <Route path="/settings" component={Settings} />
       <Route path="/login" component={Login} />

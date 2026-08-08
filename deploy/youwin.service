@@ -25,7 +25,18 @@ Environment=YOUWIN_WRITE_ORIGIN=https://write.youwin.dev
 Environment=YOUWIN_COOKIE_SECURE=true
 Environment=RUST_LOG=youwin_server=info,tower_http=warn
 
-# Holds YOUWIN_PASSWORD_HASH. Mode 0600, owned by root, NOT in the repo.
+# Optional: invalidate Cloudflare's cache after every write, so an edit appears
+# immediately instead of within s-maxage. Leave both unset to run on the TTL
+# alone, which is a supported configuration and the documented default.
+#
+# The token belongs in secrets.env below, not here, and needs the Cache Purge
+# permission ONLY. It must not be the DNS-01 token Caddy uses: that one is
+# scoped to DNS edits, and widening it to save provisioning a second token
+# trades a real boundary for a small convenience.
+#Environment=YOUWIN_CF_ZONE_ID=...
+
+# Holds YOUWIN_PASSWORD_HASH, and YOUWIN_CF_PURGE_TOKEN if purging is on.
+# Mode 0600, owned by root, NOT in the repo.
 # Generate with: youwin-server hash-password > /etc/youwin/secrets.env
 EnvironmentFile=/etc/youwin/secrets.env
 

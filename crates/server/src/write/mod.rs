@@ -21,6 +21,7 @@ use crate::{
         middleware::{check_origin, require_session},
         ratelimit::LoginLimiter,
     },
+    cache::Purger,
     db::Db,
     error::AppError,
     public::assets::Assets,
@@ -49,15 +50,25 @@ pub struct WriteState {
     /// `https://youwin.dev`. The preview's canonical link and og:url point at
     /// where the post will live, not at this host.
     pub public_origin: String,
+    /// Invalidates the public site's edge cache after a write. Disabled unless
+    /// a Cloudflare zone and purge token are configured.
+    pub purger: Arc<Purger>,
 }
 
-pub fn router(db: Db, auth: AuthConfig, assets: Assets, public_origin: String) -> Router {
+pub fn router(
+    db: Db,
+    auth: AuthConfig,
+    assets: Assets,
+    public_origin: String,
+    purger: Purger,
+) -> Router {
     let state = WriteState {
         db,
         auth: Arc::new(auth),
         limiter: Arc::new(LoginLimiter::default()),
         assets,
         public_origin,
+        purger: Arc::new(purger),
     };
 
     // Authenticated by default. Everything reachable on this host lives in this
@@ -79,6 +90,7 @@ pub fn router(db: Db, auth: AuthConfig, assets: Assets, public_origin: String) -
                 .delete(routes::posts::destroy),
         )
         .route("/api/drafts", get(routes::posts::drafts))
+        .route("/api/search", get(routes::posts::search))
         // HTML, not JSON — the one exception on this host. Rendered through the
         // public templates so a preview cannot drift from the published page.
         .route("/preview/{public_id}", get(routes::preview::show))

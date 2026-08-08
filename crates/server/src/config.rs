@@ -36,6 +36,17 @@ pub struct Config {
     /// Drives both the `Secure` attribute and the `__Host-` cookie prefix. False
     /// in dev so `http://localhost` works without special-casing browsers.
     pub cookie_secure: bool,
+
+    /// Cloudflare cache purging. Both must be set or purging stays off, and off
+    /// is a supported way to run: the `s-maxage` TTL alone is correct, just
+    /// slower. The token needs `Cache Purge` and must NOT be the DNS-01 token
+    /// Caddy uses.
+    pub cf_zone_id: Option<String>,
+    pub cf_purge_token: Option<String>,
+
+    /// Cloudflare's API root. Overridable only so the purge request can be
+    /// pointed at a local stub and inspected; nothing in production sets it.
+    pub cf_api_base: String,
 }
 
 impl Config {
@@ -49,12 +60,22 @@ impl Config {
             write_origin: env_or("YOUWIN_WRITE_ORIGIN", "http://localhost:5173"),
             password_hash: env::var("YOUWIN_PASSWORD_HASH").ok().filter(|s| !s.is_empty()),
             cookie_secure: parse_env("YOUWIN_COOKIE_SECURE", "false")?,
+            cf_zone_id: optional_env("YOUWIN_CF_ZONE_ID"),
+            cf_purge_token: optional_env("YOUWIN_CF_PURGE_TOKEN"),
+            cf_api_base: env_or("YOUWIN_CF_API_BASE", ""),
         })
     }
 }
 
 fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_owned())
+}
+
+/// An unset variable and one set to the empty string mean the same thing —
+/// systemd `Environment=` lines get commented out by blanking them as often as
+/// by deleting them.
+fn optional_env(key: &str) -> Option<String> {
+    env::var(key).ok().filter(|value| !value.is_empty())
 }
 
 fn parse_env<T>(key: &str, default: &str) -> Result<T>

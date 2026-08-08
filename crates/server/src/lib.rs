@@ -12,11 +12,16 @@
 //! `main.rs` is a thin binary over it.
 
 pub mod auth;
+pub mod backup;
+pub mod cache;
 pub mod clock;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod export;
 pub mod public;
 pub mod render;
 pub mod seed;
+pub mod tag;
+pub mod url;
 pub mod write;

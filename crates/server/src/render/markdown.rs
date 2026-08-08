@@ -4,18 +4,27 @@
 //! dropped twice on purpose (once at the parser, once at the sanitizer) because
 //! `body_html` is the one value the templates interpolate without escaping.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+};
 
 use pulldown_cmark::{CowStr, Event, LinkType, Options, Parser, Tag, TagEnd};
 
-/// Both derived columns, produced together so they can never disagree about
-/// what the source said.
+use crate::tag;
+
+/// Everything derived from one body, produced together so the three can never
+/// disagree about what the source said.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rendered {
     /// Sanitized HTML. Safe to interpolate unescaped — and nothing else is.
     pub html: String,
-    /// Plaintext, for OG descriptions and (at M5) the FTS index.
+    /// Plaintext, for OG descriptions and the FTS index.
     pub text: String,
+    /// Hashtags, in the order and casing first written, deduplicated
+    /// case-insensitively. Produced by the same pass that writes the links, so a
+    /// tag that renders as a link is always a tag the post is indexed under.
+    pub tags: Vec<String>,
 }
 
 pub fn render(source: &str) -> Rendered {
@@ -36,7 +45,7 @@ pub fn render(source: &str) -> Rendered {
         })
         .collect();
 
-    let events = autolink(events);
+    let (events, tags) = linkify(events);
 
     let mut unsafe_html = String::with_capacity(source.len() + source.len() / 2);
     pulldown_cmark::html::push_html(&mut unsafe_html, events.iter().cloned());
@@ -44,6 +53,7 @@ pub fn render(source: &str) -> Rendered {
     Rendered {
         html: sanitize(&unsafe_html),
         text: plain_text(&events),
+        tags,
     }
 }
 
@@ -81,19 +91,44 @@ fn sanitize(html: &str) -> String {
         .generic_attributes(HashSet::new())
         .url_schemes(HashSet::from(["http", "https", "mailto"]))
         .link_rel(Some("nofollow noopener noreferrer"))
-        // A relative href on a microblog is always a mistake, and on the public
-        // site it would resolve against youwin.dev and look deliberate.
-        .url_relative(ammonia::UrlRelative::Deny);
+        // A relative href written by hand is still always a mistake — but the
+        // renderer itself now emits one shape of relative link, for hashtags, so
+        // `Deny` would strip exactly the links the pass above just created.
+        .url_relative(ammonia::UrlRelative::Custom(Box::new(only_tag_links)));
 
     builder.clean(html).to_string()
 }
 
-/// Rewrites bare `http(s)://…` runs inside text into real links.
+/// Passes `/t/<slug>` through and removes every other relative href.
+///
+/// Narrow on purpose: this is the sanitizer's opinion of what a relative link
+/// may be, so it should describe the one thing the renderer generates rather
+/// than a general "internal links are fine" rule. `%` is allowed because
+/// [`tag::href`] percent-encodes non-ASCII tags.
+fn only_tag_links(url: &str) -> Option<Cow<'_, str>> {
+    let slug = url.strip_prefix("/t/")?;
+
+    let well_formed = !slug.is_empty()
+        && slug
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'%'));
+
+    well_formed.then_some(Cow::Borrowed(url))
+}
+
+/// Rewrites bare URLs and `#hashtags` inside text into real links, collecting
+/// the tags on the way through.
+///
+/// One pass for both, in that order, because they compete for the same
+/// characters: `https://example.com/#anchor` is a URL whose fragment is not a
+/// tag, and the only way to know that is to have already claimed the URL.
 ///
 /// CommonMark only autolinks `<bracketed>` URLs, but pasting a raw URL is the
 /// single most common thing anyone does in a microblog post.
-fn autolink(events: Vec<Event<'_>>) -> Vec<Event<'_>> {
+fn linkify(events: Vec<Event<'_>>) -> (Vec<Event<'_>>, Vec<String>) {
     let mut out = Vec::with_capacity(events.len());
+    let mut tags = Tags::default();
+
     // Text inside an existing link is already linked; text inside a fenced block
     // is code and must stay literal. (Inline code arrives as Event::Code, which
     // this loop never inspects, so it is safe by construction.)
@@ -119,21 +154,45 @@ fn autolink(events: Vec<Event<'_>>) -> Vec<Event<'_>> {
                 out.push(event);
             }
             Event::Text(ref text) if !in_link && !in_code_block => {
-                push_autolinked(text, &mut out);
+                push_linkified(text, &mut out, &mut tags);
             }
             other => out.push(other),
         }
     }
 
-    out
+    (out, tags.into_vec())
 }
 
-fn push_autolinked<'a>(text: &str, out: &mut Vec<Event<'a>>) {
+/// Distinct tags in first-seen order, keyed on the canonical form.
+///
+/// Unbounded on purpose: `MAX_BODY_CHARS` already bounds how many tags a post
+/// can hold. A cap here would have to either stop linking past the limit or link
+/// tags the post is not indexed under, and the second is a link to a page that
+/// does not list the post you clicked from.
+#[derive(Default)]
+struct Tags {
+    seen: HashSet<String>,
+    display: Vec<String>,
+}
+
+impl Tags {
+    fn record(&mut self, name: &str) {
+        if self.seen.insert(tag::canonical(name)) {
+            self.display.push(name.to_owned());
+        }
+    }
+
+    fn into_vec(self) -> Vec<String> {
+        self.display
+    }
+}
+
+fn push_linkified<'a>(text: &str, out: &mut Vec<Event<'a>>, tags: &mut Tags) {
     let mut cursor = 0;
 
     while let Some((start, end)) = find_url(text, cursor) {
         if start > cursor {
-            out.push(Event::Text(text[cursor..start].to_owned().into()));
+            push_hashtagged(&text[cursor..start], out, tags);
         }
 
         let url = &text[start..end];
@@ -150,8 +209,101 @@ fn push_autolinked<'a>(text: &str, out: &mut Vec<Event<'a>>) {
     }
 
     if cursor < text.len() {
+        push_hashtagged(&text[cursor..], out, tags);
+    }
+}
+
+fn push_hashtagged<'a>(text: &str, out: &mut Vec<Event<'a>>, tags: &mut Tags) {
+    let mut cursor = 0;
+
+    while let Some((start, end)) = find_hashtag(text, cursor) {
+        if start > cursor {
+            out.push(Event::Text(text[cursor..start].to_owned().into()));
+        }
+
+        let label = &text[start..end];
+        let name = &label[1..];
+        tags.record(name);
+
+        out.push(Event::Start(Tag::Link {
+            link_type: LinkType::Inline,
+            dest_url: tag::href(name).into(),
+            title: CowStr::Borrowed(""),
+            id: CowStr::Borrowed(""),
+        }));
+        // The `#` is part of the label but not part of the tag: you click "#rust"
+        // and land on the page for "rust".
+        out.push(Event::Text(label.to_owned().into()));
+        out.push(Event::End(TagEnd::Link));
+
+        cursor = end;
+    }
+
+    if cursor < text.len() {
         out.push(Event::Text(text[cursor..].to_owned().into()));
     }
+}
+
+/// Longest a tag may be, in bytes. Generous — this exists to stop a wall of text
+/// after a stray `#` becoming one enormous tag, not to police naming.
+const MAX_TAG_BYTES: usize = 64;
+
+/// Locates the next `#hashtag` at or after `from`, returning the byte range of
+/// the whole run including the leading `#`.
+fn find_hashtag(text: &str, from: usize) -> Option<(usize, usize)> {
+    let mut search = from;
+
+    while let Some(offset) = text[search..].find('#') {
+        let start = search + offset;
+
+        // Must open a word. This rejects, in order: `C#` and other trailing
+        // uses, the second `#` of a `##` heading marker, and the fragment in a
+        // bare `example.com/#anchor` that autolinking declined to claim.
+        let opens_word = text[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric() && !matches!(c, '#' | '/' | '_' | '-'));
+
+        if opens_word && let Some(len) = tag_len(&text[start + 1..]) {
+            return Some((start, start + 1 + len));
+        }
+
+        search = start + 1;
+        if search >= text.len() {
+            break;
+        }
+    }
+
+    None
+}
+
+/// Length in bytes of the tag starting at the front of `rest`, or `None` if
+/// there isn't one.
+fn tag_len(rest: &str) -> Option<usize> {
+    let mut len = 0;
+
+    for (index, c) in rest.char_indices() {
+        // A tag has to start with a letter: `#1` is a number, `# heading` is
+        // markdown, and `#-` is punctuation.
+        let allowed = if index == 0 {
+            c.is_alphabetic()
+        } else {
+            c.is_alphanumeric() || c == '_' || c == '-'
+        };
+
+        if !allowed || index >= MAX_TAG_BYTES {
+            break;
+        }
+        len = index + c.len_utf8();
+    }
+
+    // A trailing hyphen belongs to the sentence — "the #rust - a language" —
+    // the same way a trailing full stop does for a URL.
+    while rest[..len].ends_with('-') {
+        len -= 1;
+    }
+
+    (len > 0).then_some(len)
 }
 
 /// Locates the next bare URL at or after `from`, returning its byte range.
@@ -328,6 +480,79 @@ mod tests {
         }
         assert!(out.html.contains("<blockquote>"), "{}", out.html);
         assert!(out.html.contains("<li>"), "{}", out.html);
+    }
+
+    #[test]
+    fn hashtags_link_and_are_collected_once_each() {
+        let out = render("shipping #Rust and more #rust, plus #web-dev");
+
+        assert_eq!(out.tags, vec!["Rust", "web-dev"], "first casing wins, once each");
+        assert!(out.html.contains(r#"href="/t/rust""#), "{}", out.html);
+        assert!(out.html.contains(r#"href="/t/web-dev""#), "{}", out.html);
+        // The `#` shows in the label but is not part of the tag.
+        assert!(out.html.contains(">#Rust</a>"), "{}", out.html);
+        // Both spellings link; only the index deduplicates.
+        assert_eq!(out.html.matches(r#"href="/t/rust""#).count(), 2, "{}", out.html);
+        // The plaintext projection keeps the tag, so search finds it too.
+        assert!(out.text.contains("#Rust"), "{}", out.text);
+    }
+
+    #[test]
+    fn hashtag_links_survive_the_sanitizer_but_other_relative_links_do_not() {
+        // The whole reason `only_tag_links` exists: relative hrefs are otherwise
+        // stripped, and a hashtag link is relative.
+        let tag = render("#rust");
+        assert!(tag.html.contains(r#"href="/t/rust""#), "{}", tag.html);
+
+        let handwritten = render("[secrets](/etc/passwd)");
+        assert!(!handwritten.html.contains("href"), "{}", handwritten.html);
+        assert!(handwritten.html.contains("secrets"), "{}", handwritten.html);
+    }
+
+    #[test]
+    fn things_that_look_like_hashtags_but_are_not() {
+        for source in [
+            "# Heading",           // markdown, not a tag
+            "## Subheading",       //   "
+            "C# is a language",    // trailing use
+            "issue #42",           // a number
+            "see https://example.com/#anchor", // a URL fragment
+            "path/#anchor",        // ditto, unlinked
+            "a#b",                 // mid-word
+        ] {
+            assert!(
+                render(source).tags.is_empty(),
+                "{source:?} should not produce a tag, got {:?}",
+                render(source).tags
+            );
+        }
+    }
+
+    #[test]
+    fn hashtags_stop_at_punctuation_and_are_left_alone_in_code() {
+        let sentence = render("about #rust. and #solid-js, and (#maud)");
+        assert_eq!(sentence.tags, vec!["rust", "solid-js", "maud"]);
+
+        // A trailing hyphen is punctuation, not part of the name.
+        assert_eq!(render("#rust - a language").tags, vec!["rust"]);
+
+        let fenced = render("```\n#rust\n```");
+        assert!(fenced.tags.is_empty(), "{}", fenced.html);
+        assert!(!fenced.html.contains("<a "), "{}", fenced.html);
+
+        let inline = render("`#rust`");
+        assert!(inline.tags.is_empty(), "{}", inline.html);
+
+        // Already inside a link: linking again would nest anchors.
+        let labelled = render("[#rust](https://example.com)");
+        assert_eq!(labelled.html.matches("<a ").count(), 1, "{}", labelled.html);
+    }
+
+    #[test]
+    fn non_ascii_hashtags_are_percent_encoded_in_the_href() {
+        let out = render("#café");
+        assert_eq!(out.tags, vec!["café"]);
+        assert!(out.html.contains(r#"href="/t/caf%C3%A9""#), "{}", out.html);
     }
 
     #[test]

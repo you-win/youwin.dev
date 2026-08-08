@@ -9,7 +9,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::Rng as _;
 use sqlx::SqlitePool;
 
-use crate::render::markdown;
+use crate::{db::tags, render::markdown};
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, serde::Serialize, serde::Deserialize,
@@ -340,6 +340,11 @@ pub async fn update(
     .execute(&mut *tx)
     .await?;
 
+    // Unconditional, not gated on `body_changed`: the tag pass is part of
+    // rendering, so re-running it is how a change to the extraction rules takes
+    // effect on the next edit. It is also cheap — a handful of rows.
+    tags::sync(&mut tx, id, &rendered.tags).await?;
+
     tx.commit().await?;
 
     authored_by_public_id(pool, public_id).await
@@ -389,6 +394,97 @@ pub async fn soft_delete(
 
     tx.commit().await?;
     Ok(Some(affected))
+}
+
+/// A post as `export` dumps it: every column, plus the parent and thread-root
+/// ids translated out of rowids so the archive stands on its own.
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct ExportRow {
+    #[serde(skip)]
+    pub id: i64,
+    pub public_id: String,
+    pub parent_public_id: Option<String>,
+    pub root_public_id: String,
+    pub body: String,
+    pub body_html: String,
+    pub body_text: String,
+    pub visibility: Visibility,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub edited_at: Option<i64>,
+    pub deleted_at: Option<i64>,
+}
+
+// Deleted posts included. This is the backup, and a backup that silently drops
+// what you deleted is not one — soft deletion is recoverable precisely because
+// the row survives, and the export should preserve that property.
+const EXPORT_ALL: &str = "
+    SELECT p.id, p.public_id,
+           parent.public_id AS parent_public_id,
+           root.public_id   AS root_public_id,
+           p.body, p.body_html, p.body_text, p.visibility,
+           p.created_at, p.updated_at, p.edited_at, p.deleted_at
+      FROM posts p
+      LEFT JOIN posts parent ON parent.id = p.parent_id
+      JOIN      posts root   ON root.id = p.root_id
+     ORDER BY p.created_at ASC, p.id ASC";
+
+/// Every post ever written, oldest first.
+pub async fn export_all(pool: &SqlitePool) -> Result<Vec<ExportRow>, sqlx::Error> {
+    sqlx::query_as(EXPORT_ALL).fetch_all(pool).await
+}
+
+/// What a re-render changed.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Rerendered {
+    pub scanned: u64,
+    pub rewritten: u64,
+}
+
+/// Rebuilds `body_html`, `body_text` and the tag rows from `body`.
+///
+/// `body` is the authority; the other three are a cache of what the renderer
+/// made of it. Change the renderer — add hashtag linking, say — and every post
+/// written before the change is stale until this runs.
+///
+/// Deliberately does not touch `updated_at` or `edited_at`. Re-rendering is not
+/// an edit: the post says what it always said, and marking a decade of archive
+/// as "edited" because a sanitizer rule changed would be a lie in the one place
+/// the site makes a promise about its own history.
+///
+/// One transaction per post rather than one for all of them, so an interrupted
+/// run leaves a consistent database that a second run simply finishes.
+pub async fn rerender_all(pool: &SqlitePool) -> Result<Rerendered, sqlx::Error> {
+    let rows: Vec<(i64, String, String, String)> =
+        sqlx::query_as("SELECT id, body, body_html, body_text FROM posts ORDER BY id")
+            .fetch_all(pool)
+            .await?;
+
+    let mut result = Rerendered::default();
+
+    for (id, body, old_html, old_text) in rows {
+        result.scanned += 1;
+        let rendered = markdown::render(&body);
+        let mut tx = pool.begin().await?;
+
+        if rendered.html != old_html || rendered.text != old_text {
+            sqlx::query("UPDATE posts SET body_html = ?2, body_text = ?3 WHERE id = ?1")
+                .bind(id)
+                .bind(&rendered.html)
+                .bind(&rendered.text)
+                .execute(&mut *tx)
+                .await?;
+            result.rewritten += 1;
+        }
+
+        // Unconditional: tags can need rebuilding even when the HTML is byte
+        // identical, because the first run after 0002 starts from no tag rows at
+        // all while the HTML for an untagged post is unchanged.
+        tags::sync(&mut tx, id, &rendered.tags).await?;
+        tx.commit().await?;
+    }
+
+    Ok(result)
 }
 
 /// Resolves a public id to a rowid, for turning a `parent_public_id` from the
@@ -499,6 +595,10 @@ pub async fn insert(
             .execute(&mut *tx)
             .await?;
     }
+
+    // Inside the same transaction, so a tag page can never list a post that is
+    // not yet visible at its permalink.
+    tags::sync(&mut tx, id, &rendered.tags).await?;
 
     tx.commit().await?;
 

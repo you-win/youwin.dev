@@ -3,7 +3,10 @@
 use maud::{Markup, PreEscaped, html};
 
 use crate::{
-    db::posts::{FeedRow, Post, Visibility},
+    db::{
+        posts::{FeedRow, Post, Visibility},
+        search,
+    },
     public::view::time_fmt,
 };
 
@@ -55,6 +58,37 @@ pub fn feed_item(row: &FeedRow) -> Markup {
                 a href=(href) class="mt-3 inline-block text-sm text-secondary hover:text-primary" {
                     (row.reply_count)
                     @if row.reply_count == 1 { " reply" } @else { " replies" }
+                }
+            }
+        }
+    }
+}
+
+/// A search hit: the matched fragment rather than the whole post.
+///
+/// The one place the site shows something other than a complete post. A page of
+/// twenty full bodies is unreadable as a result list, and the fragment is the
+/// thing that answers "is this the one I meant".
+///
+/// Each run of the snippet is escaped by maud like any other text. The marked
+/// runs come back from FTS5 delimited by control characters — see
+/// `db::search::MARK_OPEN` — precisely so that nothing here has to interpolate
+/// database output as markup.
+pub fn search_item(hit: &search::Hit) -> Markup {
+    let href = format!("/p/{}", hit.post.public_id);
+
+    html! {
+        article class="rounded-box border border-base-300 bg-base-200 p-4" {
+            div class="mb-2 text-sm text-secondary" {
+                a href=(href) class="no-underline hover:underline" { (timestamp(&hit.post, false)) }
+                @if hit.post.parent_id.is_some() {
+                    span title="This post is a reply in a thread." { " · reply" }
+                }
+            }
+
+            p class="post-body" {
+                @for (matched, text) in search::segments(&hit.snippet) {
+                    @if matched { mark { (text) } } @else { (text) }
                 }
             }
         }

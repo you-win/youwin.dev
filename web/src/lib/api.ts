@@ -136,6 +136,19 @@ export const api = {
 
   drafts: () => request<Page>("GET", "/api/drafts"),
 
+  /**
+   * Searches everything, drafts included.
+   *
+   * The server takes whatever is typed and reduces it to quoted tokens, so no
+   * input here can produce an error status — there is nothing for the caller to
+   * validate before sending.
+   */
+  search: (query: string, cursor?: string | null) => {
+    const params = new URLSearchParams({ q: query });
+    if (cursor) params.set("cursor", cursor);
+    return request<Page>("GET", `/api/search?${params}`);
+  },
+
   show: (id: string) =>
     request<Thread>("GET", `/api/posts/${encodeURIComponent(id)}`),
 

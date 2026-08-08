@@ -50,7 +50,12 @@ youwin.dev, www.youwin.dev {
                 Strict-Transport-Security "max-age=31536000; includeSubDomains"
                 # The strongest policy on the box, and honest: this site ships
                 # zero JavaScript, so 'none' costs nothing to assert.
-                Content-Security-Policy "default-src 'none'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+                #
+                # form-action is 'self' rather than 'none' as of M5: the header
+                # carries a GET search form. 'none' blocks the submission
+                # outright, and `form-action` does NOT fall back to default-src,
+                # so this is the only line that governs it.
+                Content-Security-Policy "default-src 'none'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
                 -Server
         }
 }

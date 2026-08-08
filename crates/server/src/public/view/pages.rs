@@ -1,11 +1,39 @@
-//! The three HTML pages: feed, permalink, about.
+//! The HTML pages: feed, permalink, search, tag, tag index, about, 404.
 
 use maud::{Markup, html};
 
 use crate::{
-    db::posts::{Cursor, FeedRow, Post},
+    db::{
+        posts::{Cursor, FeedRow, Post},
+        search,
+        tags::TagCount,
+    },
     public::{assets::Assets, view::post},
+    tag, url,
 };
+
+/// Previous/next links, shared by every paginated page.
+///
+/// Takes ready-made hrefs rather than assembling them: the three callers differ
+/// in how their base URL is built (a bare path, a tag path, a query string that
+/// has to survive percent-encoding), and threading that through here would be
+/// more conditional than the markup.
+fn pager(newest: &str, older: Option<String>, is_first_page: bool) -> Markup {
+    html! {
+        @if older.is_some() || !is_first_page {
+            nav class="mt-8 flex justify-between text-sm" {
+                @if !is_first_page {
+                    a href=(newest) { "← newest" }
+                } @else {
+                    span {}
+                }
+                @if let Some(href) = older {
+                    a href=(href) { "older →" }
+                }
+            }
+        }
+    }
+}
 
 /// The feed.
 ///
@@ -45,15 +73,143 @@ pub fn feed(
             }
         }
 
-        @if older.is_some() || !is_first_page {
-            nav class="mt-8 flex justify-between text-sm" {
-                @if !is_first_page {
-                    a href="/" { "← newest" }
-                } @else {
-                    span {}
+        (pager("/", older.map(|c| format!("/?before={}", c.encode())), is_first_page))
+    };
+
+    super::layout::render(assets, &page, content)
+}
+
+/// Search results.
+///
+/// Always `noindex`: these pages are generated from whatever anyone types, so
+/// letting a crawler in creates an unbounded set of thin pages that compete with
+/// the posts themselves.
+pub fn search(
+    assets: &Assets,
+    origin: &str,
+    query: &str,
+    hits: &[search::Hit],
+    older: Option<Cursor>,
+    is_first_page: bool,
+) -> Markup {
+    let title = if query.is_empty() {
+        "Search — youwin.dev".to_owned()
+    } else {
+        format!("Search: {query} — youwin.dev")
+    };
+
+    let mut page = super::layout::Page::new(&title, "Search youwin.dev.", format!("{origin}/search"));
+    page.noindex = true;
+    page.search = query;
+
+    let encoded = url::encode_component(query);
+    let base = format!("/search?q={encoded}");
+
+    let content = html! {
+        @if query.is_empty() {
+            p class="text-secondary" { "Type something into the box above." }
+        } @else if hits.is_empty() {
+            p class="text-secondary" {
+                "Nothing matches “" (query) "”."
+            }
+        } @else {
+            @if is_first_page {
+                p class="mb-4 text-sm text-secondary" {
+                    "Results for “" (query) "”, newest first."
                 }
-                @if let Some(cursor) = older {
-                    a href=(format!("/?before={}", cursor.encode())) { "older →" }
+            }
+            div class="flex flex-col gap-4" {
+                @for hit in hits { (post::search_item(hit)) }
+            }
+        }
+
+        (pager(
+            &base,
+            older.map(|c| format!("{base}&before={}", c.encode())),
+            is_first_page,
+        ))
+    };
+
+    super::layout::render(assets, &page, content)
+}
+
+/// Everything carrying one hashtag.
+pub fn tag_page(
+    assets: &Assets,
+    origin: &str,
+    display: &str,
+    rows: &[FeedRow],
+    older: Option<Cursor>,
+    is_first_page: bool,
+) -> Markup {
+    let href = tag::href(display);
+    let title = format!("#{display} — youwin.dev");
+    let description = format!("Posts tagged #{display}.");
+
+    let mut page = super::layout::Page::new(
+        &title,
+        &description,
+        // Canonical is the lowercased path, so `/t/Rust` and `/t/rust` are not
+        // two pages with the same content.
+        format!("{origin}{href}"),
+    );
+    // An empty tag page is a URL that was meaningful once and may be again —
+    // worth serving, not worth indexing.
+    page.noindex = !is_first_page || rows.is_empty();
+
+    let content = html! {
+        div class="mb-6 flex items-baseline justify-between" {
+            h1 class="text-lg font-medium" { "#" (display) }
+            a href="/tags" class="text-sm text-secondary" { "all tags" }
+        }
+
+        @if rows.is_empty() {
+            p class="text-secondary" { "Nothing here." }
+        } @else {
+            div class="flex flex-col gap-4" {
+                @for row in rows { (post::feed_item(row)) }
+            }
+        }
+
+        (pager(
+            &href,
+            older.map(|c| format!("{href}?before={}", c.encode())),
+            is_first_page,
+        ))
+    };
+
+    super::layout::render(assets, &page, content)
+}
+
+/// Every tag in use, most-used first. Without this a tag page is reachable only
+/// by noticing a hashtag inside a post.
+pub fn tag_index(assets: &Assets, origin: &str, all: &[TagCount]) -> Markup {
+    let page = super::layout::Page::new(
+        "Tags — youwin.dev",
+        "Every tag in use on youwin.dev.",
+        format!("{origin}/tags"),
+    );
+
+    let content = html! {
+        h1 class="mb-6 text-lg font-medium" { "Tags" }
+
+        @if all.is_empty() {
+            p class="text-secondary" { "No tags yet." }
+        } @else {
+            ul class="flex flex-wrap gap-2" {
+                @for entry in all {
+                    li {
+                        // The space between the two spans is a real space, not a
+                        // flex `gap`. A gap separates them on screen but leaves
+                        // the text content as "#rust2", which is what a screen
+                        // reader announces and what a copy-paste produces.
+                        a href=(tag::href(&entry.tag))
+                          class="inline-flex items-baseline rounded-box border border-base-300 \
+                                 bg-base-200 px-3 py-1.5 text-sm no-underline hover:border-primary/50" {
+                            span { "#" (entry.display) }
+                            span class="text-secondary" { " " (entry.posts) }
+                        }
+                    }
                 }
             }
         }

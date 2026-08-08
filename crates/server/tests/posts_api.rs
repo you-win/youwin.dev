@@ -16,6 +16,7 @@ async fn every_post_route_requires_a_session(pool: SqlitePool) {
         get("/api/posts", None),
         get("/api/posts/whatever", None),
         get("/api/drafts", None),
+        get("/api/search?q=anything", None),
         get("/preview/whatever", None),
         json_request("POST", "/api/posts", r#"{"body":"hi"}"#, None),
         json_request("PATCH", "/api/posts/whatever", r#"{"body":"hi"}"#, None),
@@ -182,6 +183,30 @@ async fn the_authoring_feed_shows_every_visibility_unlike_the_public_one(pool: S
     let only = drafts.json()["posts"].as_array().unwrap().clone();
     assert_eq!(only.len(), 1);
     assert_eq!(only[0]["id"], draft.as_str());
+}
+
+#[sqlx::test]
+async fn search_finds_drafts_and_survives_anything_typed_at_it(pool: SqlitePool) {
+    let app = common::app(pool);
+    let cookie = login(&app).await;
+
+    create_post(&app, &cookie, "notes on the migration plan", "public").await;
+    let draft = create_post(&app, &cookie, "half-written migration thoughts", "draft").await;
+
+    let reply = send(&app, get("/api/search?q=migration", Some(&cookie))).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let posts = reply.json()["posts"].as_array().unwrap().clone();
+    assert_eq!(posts.len(), 2, "the draft is the whole reason this exists");
+
+    // A result must carry `body`, or it cannot be opened into the editor.
+    assert!(posts.iter().any(|p| p["id"] == draft.as_str() && p["body"].is_string()));
+
+    // The characters that are FTS5 operators or syntax errors. Every one of
+    // these reaching MATCH unescaped is a 500 on a page with a text box.
+    for query in [r#"q=%22"#, "q=NEAR(a+b,+3)", "q=*", "q=a+OR+b", "q=", "q=%21%21%21"] {
+        let reply = send(&app, get(&format!("/api/search?{query}"), Some(&cookie))).await;
+        assert_eq!(reply.status, StatusCode::OK, "{query} → {}", reply.body);
+    }
 }
 
 #[sqlx::test]

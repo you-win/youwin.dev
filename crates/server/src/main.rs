@@ -6,7 +6,9 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
-use youwin_server::{auth::password, clock::now_millis, config, db, public, seed, write};
+use youwin_server::{
+    auth::password, backup, clock::now_millis, config, db, export, public, seed, write,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -19,22 +21,70 @@ async fn main() -> Result<()> {
 
     let cfg = config::Config::from_env()?;
 
-    // Hand-rolled rather than a CLI crate: two subcommands, and an argument
-    // parser for them would be more code than the features.
+    // Hand-rolled rather than a CLI crate: a handful of subcommands with at most
+    // one positional argument between them, and a parser for that would be more
+    // code than the features.
     match std::env::args().nth(1).as_deref() {
         None => serve(cfg).await,
         Some("hash-password") => hash_password(),
-        Some("seed") => {
-            let db = db::Db::connect(&cfg).await?;
-            let result = seed::run(&db).await;
-            db.close().await;
-            result
+        Some("seed") => with_db(cfg, |db| Box::pin(async move { seed::run(db).await })).await,
+        Some("export") => {
+            // Defaults to a directory beside the database rather than the
+            // working directory: this is most often run from a systemd timer,
+            // where the working directory is not something you chose.
+            let dir = std::env::args().nth(2).map_or_else(
+                || cfg.database_path.with_file_name("export"),
+                std::path::PathBuf::from,
+            );
+            with_db(cfg, move |db| {
+                Box::pin(async move { export::run(db, &dir).await })
+            })
+            .await
+        }
+        Some("backup") => {
+            let dir = std::env::args().nth(2).map_or_else(
+                || cfg.database_path.with_file_name("backups"),
+                std::path::PathBuf::from,
+            );
+            with_db(cfg, move |db| {
+                Box::pin(async move { backup::run(db, &dir).await })
+            })
+            .await
+        }
+        Some("rerender") => {
+            with_db(cfg, |db| {
+                Box::pin(async move {
+                    let result = db::posts::rerender_all(&db.write).await?;
+                    println!(
+                        "Re-rendered {} posts; {} had stale HTML.",
+                        result.scanned, result.rewritten
+                    );
+                    Ok(())
+                })
+            })
+            .await
         }
         Some(other) => bail!(
-            "unknown subcommand {other:?}; expected `seed`, `hash-password`, or no argument to serve"
+            "unknown subcommand {other:?}; expected `seed`, `export [dir]`, `backup [dir]`, \
+             `rerender`, `hash-password`, or no argument to serve"
         ),
     }
 }
+
+/// Opens the database, runs `body`, and closes the pools whether or not it
+/// succeeded — SQLite checkpoints the WAL on close, and a subcommand that left a
+/// hot journal behind would hand the next `serve` a recovery on startup.
+async fn with_db<F>(cfg: config::Config, body: F) -> Result<()>
+where
+    F: for<'a> FnOnce(&'a db::Db) -> BoxFuture<'a, Result<()>>,
+{
+    let db = db::Db::connect(&cfg).await?;
+    let result = body(&db).await;
+    db.close().await;
+    result
+}
+
+type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Prints an argon2id PHC string for `YOUWIN_PASSWORD_HASH`.
 ///
@@ -172,6 +222,16 @@ async fn serve(cfg: config::Config) -> Result<()> {
         &cfg.public_dist,
     );
     let public = axum::serve(public_listener, public_router).with_graceful_shutdown(shutdown_signal());
+    let purger = youwin_server::cache::Purger::new(
+        cfg.cf_zone_id.as_deref(),
+        cfg.cf_purge_token.as_deref(),
+        &cfg.cf_api_base,
+    );
+    tracing::info!(
+        cache_purging = if purger.is_enabled() { "on" } else { "off (TTL only)" },
+        "edge cache",
+    );
+
     let authoring_router = write::router(
         db.clone(),
         write::AuthConfig {
@@ -181,6 +241,7 @@ async fn serve(cfg: config::Config) -> Result<()> {
         },
         assets.clone(),
         cfg.public_origin.clone(),
+        purger,
     );
     let authoring =
         axum::serve(write_listener, authoring_router).with_graceful_shutdown(shutdown_signal());

@@ -1,5 +1,7 @@
 pub mod posts;
+pub mod search;
 pub mod sessions;
+pub mod tags;
 
 use std::time::Duration;
 

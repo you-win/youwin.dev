@@ -21,6 +21,7 @@ and `config.toml` go away at the start of M0.
 | Database | SQLite via `sqlx` — async API, embedded migrations. Runtime-checked queries; no `cargo sqlx`, no build-time database |
 | Auth | Password + `argon2id` → session cookie, scoped to the authoring subdomain only |
 | Post content | Text with a markdown subset. Self-replies chain into threads |
+| Search & tags | FTS5 over `body_text` (porter-stemmed) and `#hashtags`, on both surfaces |
 | No images in v1 | No upload path, no attachment table. Sanitizer strips `<img>` |
 
 The split is what makes the rest simple. A single origin serving both audiences would
@@ -73,15 +74,20 @@ nothing. In dev, Vite proxies `/api` to `127.0.0.1:8081` so cookies behave as in
 youwin.dev/
 ├─ Cargo.toml
 ├─ crates/server/
-│  ├─ migrations/             # 0001_init.sql — embedded by sqlx::migrate!(), no CLI
-│  ├─ tests/                  # pools.rs, posts.rs — one per statement in db/
+│  ├─ migrations/             # 0001_init, 0002_search_and_tags — sqlx::migrate!(), no CLI
+│  ├─ tests/                  # one per statement in db/, plus the router integration tests
 │  └─ src/
 │     ├─ lib.rs               # the crate proper — a lib so tests can reach the modules
-│     ├─ main.rs              # thin binary: two listeners, graceful shutdown, `seed`
+│     ├─ main.rs              # thin binary: two listeners, graceful shutdown, subcommands
 │     ├─ config.rs            # env → Config, fail fast on missing secrets
 │     ├─ seed.rs              # `youwin-server seed` — dev rows via the real pipeline
-│     ├─ db/{mod,posts}.rs    # pools + every statement  (+ sessions.rs at M2)
-│     ├─ auth/{mod,password,session,middleware}.rs        (M2)
+│     ├─ export.rs            # `export` — posts.json + a markdown tree           (M5)
+│     ├─ backup.rs            # `backup` — VACUUM INTO, dated, 30 kept            (M5)
+│     ├─ cache.rs             # Cloudflare purge-on-write, off unless configured  (M5)
+│     ├─ tag.rs               # canonical form + href — shared by render, db, view (M5)
+│     ├─ url.rs               # percent-encoding for tag paths and ?q=            (M5)
+│     ├─ db/{mod,posts,sessions,search,tags}.rs   # pools + every statement
+│     ├─ auth/{mod,password,session,middleware,ratelimit}.rs
 │     ├─ public/              # youwin.dev :8080
 │     │  ├─ mod.rs            # Router — read pool only
 │     │  ├─ assets.rs         # Vite manifest → hashed stylesheet URL, read at boot
@@ -89,8 +95,8 @@ youwin.dev/
 │     │  └─ view/             # maud: layout, pages, post, atom, time_fmt
 │     ├─ write/               # write.youwin.dev :8081
 │     │  ├─ mod.rs            # Router — read + write pools
-│     │  └─ routes/{auth,posts,drafts,preview}.rs         (M2/M3)
-│     ├─ render/markdown.rs
+│     │  └─ routes/{auth,posts,preview}.rs
+│     ├─ render/markdown.rs   # markdown → html + text + tags, in one pass
 │     └─ error.rs             # AppError → IntoResponse
 ├─ web/                       # pnpm; builds BOTH stylesheets and the SPA
 │  ├─ vite.config.ts
@@ -98,12 +104,13 @@ youwin.dev/
 │     ├─ theme.css            # mistwood tokens — single source of truth, imported by both
 │     ├─ public.css           # tailwind + theme, no DaisyUI → the public site
 │     ├─ app.css              # tailwind + DaisyUI + theme → the SPA
-│     ├─ lib/api.ts
-│     ├─ routes/{feed,permalink,login,drafts,settings}.tsx
-│     └─ components/{Composer,PostCard,Thread,Feed}.tsx
+│     ├─ lib/{api,session,pwa}.ts
+│     ├─ routes/{Feed,Permalink,Login,Drafts,Search,Settings}.tsx
+│     └─ components/{Composer,PostCard}.tsx
 └─ deploy/
    ├─ Caddyfile.youwin.dev    # both blocks
    ├─ youwin.service
+   ├─ youwin-backup.{service,timer}
    └─ deploy.sh
 ```
 
@@ -175,9 +182,43 @@ database at build time. The only thing the CLI would have done is create the fil
 timestamp prefix, so create it by hand: `0001_init.sql`, `0002_add_fts.sql`. The version is
 whatever leading integer you write, and it only has to increase.
 
-**Deferred to a later milestone**, but the schema is ready for both:
-FTS5 over `body_text` with an external-content table plus insert/update/delete triggers,
-and hashtag extraction into a `tags`/`post_tags` pair at render time.
+### Search and tags (`0002_search_and_tags.sql`, M5)
+
+**`posts_fts` is an external-content FTS5 table** over `body_text`: the index stores terms,
+`posts` stores the text, `content_rowid=id` ties them together. Without `content=` there
+would be a second copy of every post that could drift from the first. Three triggers keep
+it in step, and the update trigger is `AFTER UPDATE OF body_text` — narrowed to the one
+column, because a soft delete and a visibility flip both `UPDATE posts` and would otherwise
+tear down and rebuild an index entry that did not change.
+
+Soft-deleted and draft posts stay *in* the index; every search joins `posts` and filters
+there. Keeping the index a plain mirror of the text means changing a post's visibility is
+one `UPDATE` rather than an index edit that could half-apply.
+
+The tokenizer is `porter unicode61 remove_diacritics 2`. Stemming is what makes the most
+common failed search — singular for plural — work at all. It is English-only, and other
+languages degrade to exact-token matching, which is what an unstemmed index would have
+given anyway; strictly better, never worse.
+
+**Hashtags are extracted by the pass that links them.** `render::markdown` returns
+`Rendered { html, text, tags }`, and `posts::insert`/`update` write the tag rows inside the
+same transaction as the post. One pass, one source: a tag that renders as a link is always
+a tag the post is indexed under. The alternative — extract in SQL, link in Rust — has two
+notions of what a tag is, and they disagree the first time the rules change.
+
+`tags.tag` holds the lowercased form and `tags.display` the casing first written, so a page
+can title itself `#TypeScript`. Lowercasing happens in Rust, **not** via `COLLATE NOCASE`,
+which folds ASCII only and would file `#Café` and `#café` as two tags.
+
+Because the sanitizer denies relative hrefs, hashtag links needed an exception:
+`UrlRelative::Custom` passes `/t/<slug>` through and removes every other relative URL. The
+narrow rule is the point — it describes the one shape the renderer emits rather than
+declaring internal links generally fine.
+
+One consequence to note: ammonia's blanket `link_rel` puts `nofollow` on tag links too,
+since the filter sees attributes one at a time and cannot condition `rel` on `href`. Tag
+pages stay crawlable through `/tags`, which is in the nav on every page, so this costs
+nothing worth adding a filter for.
 
 ## Concurrency
 
@@ -297,9 +338,39 @@ was never throughput, only not blocking the reactor.
 GET  /                    feed, newest first
 GET  /?before=<cursor>    older page
 GET  /p/:public_id        permalink — the post plus its whole thread
+GET  /search?q=           full-text search                                (M5)
+GET  /t/:tag              everything carrying one hashtag                 (M5)
+GET  /tags                every tag in use, most-used first               (M5)
 GET  /about
 GET  /feed.xml            Atom, public roots
 ```
+
+**Search is a GET form in the header**, so a search is a URL you can link, bookmark and go
+back to — and the site still ships zero JavaScript. This is the one line of the public CSP
+that had to loosen: `form-action` went from `'none'` to `'self'`, and it does **not** fall
+back to `default-src`, so that line alone governs whether the form works at all.
+
+**Every input becomes a valid query or none.** `search::fts_query` splits on non-alphanumeric
+characters and quotes each token, which makes every token a literal phrase and takes FTS5's
+operators — `AND`, `OR`, `NOT`, `NEAR`, `*`, `^`, `:` — off the table along with every way
+to write a syntax error. Tokens are ANDed, so more words narrow. The trade is deliberate: no
+boolean operators, in exchange for a public text box where no input is a 500. A stray
+apostrophe is far likelier than a hand-written `NEAR(a b, 3)`.
+
+**Results are ordered by recency, not `bm25()`.** Searching a personal archive is re-finding
+something you know you wrote, where "when" is the strongest remaining clue; relevance
+scoring across 300-character posts mostly ranks on length. It also means search paginates
+with the same keyset cursor as the feed rather than needing a score-based one.
+
+**Snippet markers are control characters.** FTS5 wraps matched terms in delimiters of our
+choosing; choosing `<mark>` would mean interpolating database output into a page unescaped,
+which is a privilege only `body_html` has earned. ASCII STX/ETX come back as inert text,
+`search::segments` splits on them, and maud escapes each run.
+
+**Search pages are always `noindex`**, and so is an empty tag page. A tag nothing has ever
+used is a 404 rather than an empty page, which is what keeps `/t/<anything>` from being an
+unbounded space of thin pages for a crawler to walk. A tag whose posts were all deleted
+keeps its row and stays a 200 — the URL meant something once and may again.
 
 `maud` rather than `askama`. The templates are ~6 functions returning `Markup`; they
 compose as functions, auto-escape by construction, and — the actual argument — the
@@ -346,9 +417,26 @@ Without both, the preview renders unstyled, which is precisely the thing it exis
 **Edge caching.** Cookieless and JS-free means Cloudflare can cache the whole surface.
 `Cache-Control: public, max-age=60, s-maxage=300` plus a Cloudflare cache rule (CF does not
 cache HTML by default). The cost is that an edit or delete takes up to five minutes to
-appear. If that grates, a purge-by-URL call on write is ~20 lines — but it needs a second
-CF API token with cache-purge scope, since the DNS-01 token is scoped to DNS. Start with
-the TTL.
+appear.
+
+**Purge on write (M5) closes that gap, and is off unless configured.** Running on the TTL
+alone stays a supported configuration; setting `YOUWIN_CF_ZONE_ID` and
+`YOUWIN_CF_PURGE_TOKEN` turns it on. The token needs a second Cloudflare API token scoped
+to `Cache Purge` — the DNS-01 token Caddy uses is scoped to DNS, and widening it to save
+provisioning one more would trade a real boundary for a small convenience.
+
+It purges **everything**, not a URL list. One write invalidates more than it looks like: a
+reply changes its own permalink, every *other* permalink in the thread (each renders the
+whole thread), the feed, the Atom document, each of its tag pages, the tag index, and any
+cached search results that matched it. Enumerating that correctly is a bug waiting to
+happen whose failure mode is a stale page nobody notices; purging everything cannot be
+incomplete. The cost is a few origin renders and one re-fetch of a 10 kB stylesheet, on a
+site written to a handful of times a day.
+
+The call is spawned and never awaited: the write has already committed, so no outcome there
+should turn a successful post into an error. A failure is logged and the TTL takes over.
+The cost of all this is `reqwest` + `rustls` — about 28 crates on a binary that otherwise
+makes no outbound connections, which is the honest reason this stayed optional for so long.
 
 ## Authoring API — `write.youwin.dev`
 
@@ -364,6 +452,7 @@ GET    /api/auth/me                   401 when unauthenticated — the auth prob
 GET    /api/feed?cursor=&limit=20     ALL visibilities, flagged
 GET    /api/posts/:public_id          post + thread
 GET    /api/drafts
+GET    /api/search?q=&cursor=         ALL visibilities, drafts included    (M5)
 POST   /api/posts         {body, parent_public_id?, visibility}
 PATCH  /api/posts/:id     {body?, visibility?}
 DELETE /api/posts/:id                 sets deleted_at
@@ -701,10 +790,27 @@ tree, runs `cargo build --release` on the server, installs the binary, and resta
 unit. Nothing beyond a Rust toolchain and a C compiler is needed there — no database at
 build time, no `cargo sqlx`.
 
-**Backups.** WAL means `cp` of the `.db` file is not a valid backup. A systemd timer runs
-`sqlite3 youwin.db ".backup /var/backups/youwin/$(date +%F).db"` nightly. Separately,
-`youwin-server export` dumps every post as JSON + markdown files — the actual insurance
-policy, since it survives SQLite itself.
+**Backups.** WAL means `cp` of the `.db` file is not a valid backup — the `.db` alone can be
+missing every commit still sitting in the `-wal`. `youwin-backup.timer` runs two things
+nightly, insuring against different failures:
+
+- `youwin-server backup` — `VACUUM INTO`, which reads through one consistent snapshot of a
+  live database and writes a compact self-contained file, with the site still serving. Done
+  in-process rather than by shelling out to `sqlite3`, which keeps the server's only
+  requirement a Rust toolchain. Writes to a `.part` and renames, so an interrupted run
+  leaves a stray file rather than replacing yesterday's good backup with a truncated one.
+  Keeps 30 dated files, and only ever deletes names matching exactly `youwin-YYYY-MM-DD.db`.
+- `youwin-server export` — `posts.json` (every column, deletions included, enough to rebuild
+  the database) plus a markdown tree with front matter. The real insurance policy: readable
+  in ten years with no SQLite, no Rust, and no memory of how any of this worked.
+
+**`youwin-server rerender`** rebuilds `body_html`, `body_text` and the tag rows from `body`,
+which is the authority. Needed whenever the renderer changes — M5 is exactly that case, and
+hashtags in existing posts are neither linked nor indexed until it runs. It deliberately
+does not touch `updated_at` or `edited_at`: a re-render is not an edit, and marking an
+archive as edited because a sanitizer rule changed would be a false claim about its history.
+One transaction per post, so an interrupted run leaves a consistent database a second run
+simply finishes.
 
 ## Milestones
 
@@ -715,15 +821,21 @@ policy, since it survives SQLite itself.
 | **M2** | Auth | ✅ **Code done.** `hash-password`, login, sessions, structural guard, throttling, Origin check. 61 tests green. Deploy artifacts written to [`deploy/`](deploy/README.md) — **installing them on the server is still outstanding**, including the Cloudflare cache rule without which M1's caching headers are inert |
 | **M3** | Authoring app | ✅ **Done.** Solid SPA — composer with optimistic insert, inline edit, create/edit/soft-delete, drafts, replies, `/preview/:id` through the public templates. 81 tests green |
 | **M4** | PWA | ✅ **Done.** Generated icons, manifest, service worker, offline feed, update prompt, install prompt, share sheet. Offline verified against `pnpm run preview` with every server stopped |
-| **M5** | Polish | FTS5 search, hashtags, `export`, backup timer, optional cache purge on write |
+| **M5** | Polish | ✅ **Done.** FTS5 search on both surfaces, hashtags with `/t/:tag` and `/tags`, `export`, `backup` + nightly timer, `rerender`, Cloudflare purge-on-write (off unless configured). 114 tests green |
 
 The split changes the shape of the plan more than anything else: **M1 ships a complete,
 finished artifact** — a public archive at `youwin.dev` that works and is done — rather
 than half of a surface that needs auth before it means anything. Writing happens over SSH
 and `INSERT` until M3, which is a perfectly good way to run a blog for a few weeks.
 
+**Still outstanding, and not a code task:** none of this is on the server yet. The Caddy
+blocks, the systemd units, the backup timer and — the one that is easy to skip and silently
+inert — the **Cloudflare cache rule**, without which M1's `s-maxage` header does nothing at
+all. See [`deploy/README.md`](deploy/README.md). After the first M5 deploy, run
+`youwin-server rerender` once so existing posts pick up hashtag links.
+
 ## Deliberately not in v1
 
 Image uploads · link preview cards · multi-user or comments · federation
-(ActivityPub) · full-text search (M5) · scheduled posts · analytics
+(ActivityPub) · scheduled posts · analytics
 (Umami is already on the box if it's ever wanted) · likes or counters of any kind.

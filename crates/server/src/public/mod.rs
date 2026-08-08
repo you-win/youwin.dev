@@ -34,6 +34,9 @@ pub fn router(read: SqlitePool, assets: Assets, origin: String, dist: &Path) -> 
         .route("/", get(routes::feed))
         // axum 0.8 uses `{param}`; the 0.7 `:param` syntax now panics at startup.
         .route("/p/{public_id}", get(routes::permalink))
+        .route("/search", get(routes::search))
+        .route("/t/{tag}", get(routes::tag_page))
+        .route("/tags", get(routes::tag_index))
         .route("/about", get(routes::about))
         .route("/feed.xml", get(routes::feed_xml))
         .route("/health", get(routes::health))

@@ -104,15 +104,19 @@
     -webkit-text-size-adjust: 100%;
   }
 
-  /* iOS Safari zooms the page when a focused input is under 16px. */
-  textarea,
-  input,
-  select {
-    font-size: max(16px, 1rem);
-  }
-
   ::selection {
     background-color: oklch(74% 0.105 158 / 0.28);
+  }
+
+  /* Search hits. The user-agent default is black on yellow, which on this
+     palette reads as an error state rather than an answer — and sets its own
+     foreground colour, so it must be overridden too. Deliberately close to
+     ::selection above: both mean "this is the part you asked for". */
+  mark {
+    background-color: oklch(74% 0.105 158 / 0.22);
+    color: inherit;
+    border-radius: 0.2rem;
+    padding: 0 0.15em;
   }
 
   /* Keyboard focus has to survive a low-contrast palette — the ring is primary,
@@ -121,6 +125,21 @@
     outline: 2px solid var(--color-primary);
     outline-offset: 2px;
   }
+}
+
+/* iOS Safari zooms the page when a focused form control is under 16px, and the
+   zoom does not undo itself — you finish typing and the layout is stranded.
+
+   Deliberately NOT inside @layer base, where this used to live and quietly did
+   nothing. DaisyUI's .input/.select/.textarea are @layer components, and
+   Tailwind's text-sm is @layer utilities; both outrank base, so every styled
+   control on the authoring app was 14px regardless. An unlayered rule outranks
+   every layer, which is the priority a floor like this needs: it is not a
+   default to be overridden, it is the minimum. */
+textarea,
+input,
+select {
+  font-size: max(16px, 1rem);
 }
 
 /* Rendered post bodies. The server emits a fixed, sanitized tag set (see

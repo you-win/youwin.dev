@@ -18,6 +18,7 @@ use sqlx::SqlitePool;
 use tower::ServiceExt as _;
 use youwin_server::{
     auth::password,
+    cache::Purger,
     db::Db,
     public::assets::Assets,
     write::{self, AuthConfig},
@@ -28,6 +29,16 @@ pub const ORIGIN: &str = "https://write.youwin.dev";
 pub const PUBLIC_ORIGIN: &str = "https://youwin.dev";
 
 pub fn app(pool: SqlitePool) -> Router {
+    build(pool, Purger::Disabled)
+}
+
+/// The app with cache purging pointed at `api_base` — a local stub, in practice,
+/// so the request the purger builds can be looked at rather than assumed.
+pub fn app_purging_to(pool: SqlitePool, api_base: &str) -> Router {
+    build(pool, Purger::new(Some("test-zone"), Some("test-token"), api_base))
+}
+
+fn build(pool: SqlitePool, purger: Purger) -> Router {
     // Auth does not exercise the read/write split — `tests/pools.rs` covers that
     // — so one pool stands in for both here.
     let db = Db {
@@ -48,6 +59,7 @@ pub fn app(pool: SqlitePool) -> Router {
             css: "/assets/test.css".to_owned(),
         },
         PUBLIC_ORIGIN.to_owned(),
+        purger,
     )
 }
 

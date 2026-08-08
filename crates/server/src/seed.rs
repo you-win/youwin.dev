@@ -34,11 +34,12 @@ pub async fn run(db: &Db) -> Result<()> {
     .expect("timestamp fits in i64 until the year 292 million");
 
     // Deliberately exercises every branch the templates have: a plain post, one
-    // with formatting, a thread, an unlisted post, and a draft. If the feed looks
-    // right after seeding, the feed is right.
+    // with formatting, a thread, an unlisted post, a draft, and enough hashtags
+    // that /tags and /t/:tag have something to show. If the feed looks right
+    // after seeding, the feed is right.
     let root = posts::insert(
         &db.write,
-        "Rebuilt this site as a microblog. Rust on the back, no JavaScript on the front.\n\
+        "Rebuilt this site as a microblog. #Rust on the back, no JavaScript on the front.\n\
          The whole public surface is server-rendered and sits in cache.",
         None,
         Visibility::Public,
@@ -59,9 +60,9 @@ pub async fn run(db: &Db) -> Result<()> {
 
     posts::insert(
         &db.write,
-        "Second thing: SQLite takes exactly one writer. Two pools — one connection for \
+        "Second thing: #sqlite takes exactly one writer. Two pools — one connection for \
          writes, four for reads — and the collision stops being possible instead of being \
-         retried.",
+         retried. #rust makes that a type-level guarantee rather than a convention.",
         Some(root.id),
         Visibility::Public,
         now - 3 * DAY_MILLIS + 55 * 60 * 1000,
@@ -82,7 +83,9 @@ pub async fn run(db: &Db) -> Result<()> {
         &db.write,
         "Formatting check — **bold**, *italic*, ~~struck~~, `inline code`, and a list:\n\n\
          - one\n- two\n- three\n\n\
-         > Mist has no hard edges.",
+         > Mist has no hard edges.\n\n\
+         Tag handling too: #web-dev is one tag, `#notatag` in code is none, and C# is \
+         not a tag at all.",
         None,
         Visibility::Public,
         now - DAY_MILLIS,

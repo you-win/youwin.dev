@@ -60,6 +60,33 @@ In the dashboard: Caching → Cache Rules → for `youwin.dev`, "Eligible for ca
 with "Respect origin TTL". Do **not** apply it to `write.youwin.dev`, which is
 entirely authenticated.
 
+**7. Backups**
+
+```bash
+sudo cp deploy/youwin-backup.service deploy/youwin-backup.timer /etc/systemd/system/
+sudo chown youwin:youwin /var/backups/youwin
+sudo systemctl daemon-reload
+sudo systemctl enable --now youwin-backup.timer
+sudo systemctl start youwin-backup.service   # take one now rather than waiting
+```
+
+**8. Cache purging on write — optional**
+
+Skip this and the site runs on the `s-maxage` TTL alone, which is correct: an
+edit takes up to five minutes to appear. To close that gap, create a **second**
+Cloudflare API token with the `Cache Purge` permission — not the DNS-01 token
+Caddy uses, which is scoped to DNS and should stay that way — then:
+
+```bash
+echo 'YOUWIN_CF_PURGE_TOKEN=...' | sudo tee -a /etc/youwin/secrets.env
+sudo sed -i 's|^#Environment=YOUWIN_CF_ZONE_ID=.*|Environment=YOUWIN_CF_ZONE_ID=<zone id>|' /etc/systemd/system/youwin.service
+sudo systemctl daemon-reload && sudo systemctl restart youwin
+journalctl -u youwin -n 20 | grep 'edge cache'   # expect: cache_purging="on"
+```
+
+Every write then purges the whole zone. A failed purge is logged and never fails
+the write.
+
 ## Routine deploys
 
 ```bash
@@ -69,17 +96,51 @@ entirely authenticated.
 Builds both frontends locally, rsyncs, builds the binary on the server, installs
 it atomically, restarts, and health-checks both listeners.
 
+### After deploying a change to the renderer
+
+`body_html` is a cache of what the renderer made of `body`, so posts written
+before a renderer change keep their old HTML. **M5 is exactly this case**:
+hashtags in existing posts are neither linked nor indexed until you run
+
+```bash
+sudo -u youwin /srv/youwin/bin/youwin-server rerender
+```
+
+It is idempotent, safe to run at any time, and does not mark anything as edited.
+
 ## Backups
 
 WAL means `cp` of the `.db` file is **not** a valid backup — it can capture a
-torn state with the committed data still sitting in the `-wal` sidecar.
+torn state with the committed data still sitting in the `-wal` sidecar. The
+nightly timer installed above runs two things instead:
 
 ```bash
-sqlite3 /var/lib/youwin/youwin.db ".backup /var/backups/youwin/$(date +%F).db"
+youwin-server backup /var/backups/youwin        # VACUUM INTO — a consistent .db
+youwin-server export /var/backups/youwin/export # posts.json + a markdown tree
 ```
 
-Put that on a nightly systemd timer. `youwin-server export` (M5) is the real
-insurance policy, since a directory of markdown outlives SQLite itself.
+`backup` uses SQLite's `VACUUM INTO`, which reads through one consistent
+snapshot of a live WAL database, so nothing has to be stopped. It keeps the last
+30 dated files and removes nothing else — only names matching exactly
+`youwin-YYYY-MM-DD.db` are ever candidates for deletion.
+
+`export` is the one that outlives everything: a directory of markdown with front
+matter is readable with no SQLite, no Rust toolchain, and no memory of how any of
+this worked. `posts.json` alongside it is complete enough to rebuild the
+database, deletions included.
+
+To restore, stop the service and put a backup in place:
+
+```bash
+sudo systemctl stop youwin
+sudo -u youwin cp /var/backups/youwin/youwin-2026-08-08.db /var/lib/youwin/youwin.db
+sudo -u youwin rm -f /var/lib/youwin/youwin.db-wal /var/lib/youwin/youwin.db-shm
+sudo systemctl start youwin
+```
+
+Removing the sidecars matters: they belong to the database you replaced, and
+leaving them next to a different file is how you corrupt the one you just
+restored.
 
 ## Checking on it
 

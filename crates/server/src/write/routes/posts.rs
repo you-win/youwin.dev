@@ -15,7 +15,10 @@ use serde_json::json;
 
 use crate::{
     clock::now_millis,
-    db::posts::{self, AuthoredRow, Cursor, Visibility},
+    db::{
+        posts::{self, AuthoredRow, Cursor, Visibility},
+        search,
+    },
     error::AppError,
     write::WriteState,
 };
@@ -118,6 +121,41 @@ pub async fn feed(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SearchParams {
+    q: Option<String>,
+    cursor: Option<String>,
+    limit: Option<i64>,
+}
+
+/// Search across everything the author can see — drafts and unlisted included.
+///
+/// Same `FeedDto` as the feed, so the app renders a result the same way it
+/// renders any other post: full body, with the same edit and delete controls. A
+/// result you cannot act on would be the wrong shape for the one surface where
+/// finding a half-written draft is the point.
+pub async fn search(
+    State(state): State<WriteState>,
+    Query(params): Query<SearchParams>,
+) -> Result<Json<FeedDto>, AppError> {
+    let cursor = params
+        .cursor
+        .as_deref()
+        .and_then(Cursor::decode)
+        .unwrap_or(Cursor::START);
+    let limit = params.limit.unwrap_or(PAGE_SIZE).clamp(1, MAX_PAGE_SIZE);
+
+    let (rows, next) = match search::fts_query(params.q.as_deref().unwrap_or_default()) {
+        Some(query) => search::authored(&state.db.read, &query, cursor, limit).await?,
+        None => (Vec::new(), None),
+    };
+
+    Ok(Json(FeedDto {
+        posts: rows.iter().map(PostDto::from).collect(),
+        next: next.map(Cursor::encode),
+    }))
+}
+
 pub async fn drafts(State(state): State<WriteState>) -> Result<Json<FeedDto>, AppError> {
     let rows = posts::drafts(&state.db.read).await?;
 
@@ -170,6 +208,7 @@ pub async fn create(
     .await?;
 
     tracing::info!(id = %post.public_id, visibility = post.visibility.as_str(), "created post");
+    state.purger.purge_everything();
 
     // Re-read so the response carries reply_count and the stored body, matching
     // exactly what a subsequent fetch would return.
@@ -206,6 +245,13 @@ pub async fn update(
     };
 
     tracing::info!(id = %public_id, visibility = row.post.visibility.as_str(), "updated post");
+
+    // Fired even for a draft-to-draft edit, which cannot have been cached. The
+    // alternative is comparing the visibility before and after and reasoning
+    // about which transitions matter; at a handful of writes a day, one wasted
+    // purge is cheaper than that rule being subtly wrong.
+    state.purger.purge_everything();
+
     Ok(Json(PostDto::from(&row)))
 }
 
@@ -218,6 +264,7 @@ pub async fn destroy(
     };
 
     tracing::info!(id = %public_id, removed, "deleted post");
+    state.purger.purge_everything();
 
     // `removed` exceeds 1 when a thread root took its replies with it — the
     // client shows that count so the blast radius is never a surprise.

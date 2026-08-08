@@ -5,6 +5,7 @@
 
 use time::{OffsetDateTime, format_description::BorrowedFormatItem, macros::format_description};
 
+const DATE: &[BorrowedFormatItem<'_>] = format_description!("[year]-[month]-[day]");
 const HUMAN: &[BorrowedFormatItem<'_>] = format_description!("[day padding:none] [month repr:short] [year]");
 const HUMAN_WITH_TIME: &[BorrowedFormatItem<'_>] =
     format_description!("[day padding:none] [month repr:short] [year] · [hour]:[minute] UTC");
@@ -12,6 +13,13 @@ const HUMAN_WITH_TIME: &[BorrowedFormatItem<'_>] =
 fn to_datetime(millis: i64) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp_nanos(i128::from(millis) * 1_000_000)
         .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+}
+
+/// "2026-08-08" — sorts lexically, which is what `export` names files by.
+pub fn date(millis: i64) -> String {
+    to_datetime(millis)
+        .format(DATE)
+        .unwrap_or_else(|_| String::new())
 }
 
 /// "8 Aug 2026" — for feed rows.
@@ -44,6 +52,7 @@ mod tests {
 
     #[test]
     fn formats_are_stable_and_utc() {
+        assert_eq!(date(SAMPLE), "2026-08-09");
         assert_eq!(human(SAMPLE), "9 Aug 2026");
         assert_eq!(human_with_time(SAMPLE), "9 Aug 2026 · 07:06 UTC");
         assert_eq!(rfc3339(SAMPLE), "2026-08-09T07:06:39Z");

@@ -9,7 +9,10 @@ use maud::Markup;
 use serde::Deserialize;
 
 use crate::{
-    db::posts::{self, Cursor},
+    db::{
+        posts::{self, Cursor},
+        search, tags,
+    },
     error::AppError,
     public::{
         PublicState,
@@ -82,6 +85,91 @@ pub async fn permalink(
         markdown::summarize(&focused.body_text, SUMMARY_CHARS),
     )
     .into_response())
+}
+
+/// Longest query echoed back into the page. Anything past this is not a search,
+/// and a title tag built from 8 kB of query string is its own small problem.
+const MAX_QUERY_CHARS: usize = 120;
+
+#[derive(Debug, Deserialize)]
+pub struct SearchParams {
+    q: Option<String>,
+    before: Option<String>,
+}
+
+pub async fn search(
+    State(state): State<PublicState>,
+    Query(params): Query<SearchParams>,
+) -> Result<Markup, AppError> {
+    let typed: String = params
+        .q
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(MAX_QUERY_CHARS)
+        .collect();
+
+    let cursor = params
+        .before
+        .as_deref()
+        .and_then(Cursor::decode)
+        .unwrap_or(Cursor::START);
+    let is_first_page = cursor == Cursor::START;
+
+    // `None` means there was nothing tokenizable — an empty box, or someone who
+    // typed only punctuation. Both render as "no results" without touching the
+    // database, which also keeps `?q=%22%22` off the query planner.
+    let hits = match search::fts_query(&typed) {
+        Some(query) => search::public(&state.read, &query, cursor, PAGE_SIZE).await?,
+        None => (Vec::new(), None),
+    };
+
+    Ok(pages::search(
+        &state.assets,
+        &state.origin,
+        &typed,
+        &hits.0,
+        hits.1,
+        is_first_page,
+    ))
+}
+
+pub async fn tag_page(
+    State(state): State<PublicState>,
+    Path(name): Path<String>,
+    Query(params): Query<FeedParams>,
+) -> Result<Response, AppError> {
+    // A tag nothing has ever used is a 404, not an empty page: without that,
+    // `/t/<anything>` is an unbounded space of valid URLs for a crawler to walk.
+    // A tag whose posts were all deleted keeps its row, so that page stays a 200
+    // — the URL meant something once and may again.
+    let Some(display) = tags::display_name(&state.read, &name).await? else {
+        return Ok(not_found(&state).into_response());
+    };
+
+    let cursor = params
+        .before
+        .as_deref()
+        .and_then(Cursor::decode)
+        .unwrap_or(Cursor::START);
+    let is_first_page = cursor == Cursor::START;
+
+    let (rows, older) = tags::feed_page(&state.read, &name, cursor, PAGE_SIZE).await?;
+
+    Ok(pages::tag_page(
+        &state.assets,
+        &state.origin,
+        &display,
+        &rows,
+        older,
+        is_first_page,
+    )
+    .into_response())
+}
+
+pub async fn tag_index(State(state): State<PublicState>) -> Result<Markup, AppError> {
+    let all = tags::all(&state.read).await?;
+    Ok(pages::tag_index(&state.assets, &state.origin, &all))
 }
 
 pub async fn about(State(state): State<PublicState>) -> Markup {

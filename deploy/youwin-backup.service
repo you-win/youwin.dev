@@ -1,0 +1,51 @@
+# /etc/systemd/system/youwin-backup.service
+#
+# Triggered by youwin-backup.timer; not enabled directly.
+#
+# Two steps, because they insure against different failures. `backup` is a
+# consistent SQLite snapshot — what you restore from when the disk or the file
+# goes bad. `export` is JSON plus a markdown tree — what you still have when
+# SQLite, this program, or your interest in maintaining it is gone.
+#
+# Both run as the same user as the server. Neither stops it: VACUUM INTO reads
+# through a snapshot of a live WAL database, so there is no downtime and no
+# window where the site is unavailable.
+
+[Unit]
+Description=youwin.dev nightly backup and export
+# Not a hard dependency: a backup is worth taking whether or not the site is up,
+# and is arguably more urgent when it is down.
+After=youwin.service
+
+[Service]
+Type=oneshot
+User=youwin
+Group=youwin
+WorkingDirectory=/srv/youwin
+
+Environment=YOUWIN_DB=/var/lib/youwin/youwin.db
+Environment=RUST_LOG=youwin_server=info
+
+# Keeps the last 30 dated snapshots itself; nothing external prunes them.
+ExecStart=/srv/youwin/bin/youwin-server backup /var/backups/youwin
+ExecStart=/srv/youwin/bin/youwin-server export /var/backups/youwin/export
+
+# Same hardening as the server, plus the backup directory. The database path
+# stays writable because opening SQLite touches the -wal and -shm sidecars even
+# when only reading.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/youwin /var/backups/youwin
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+# No network at all: this reads a file and writes files.
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native

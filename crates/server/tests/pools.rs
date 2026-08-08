@@ -23,6 +23,9 @@ fn test_config(database_path: PathBuf) -> Config {
         write_origin: "http://localhost".to_owned(),
         password_hash: None,
         cookie_secure: false,
+        cf_zone_id: None,
+        cf_purge_token: None,
+        cf_api_base: String::new(),
     }
 }
 
