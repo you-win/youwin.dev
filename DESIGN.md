@@ -783,12 +783,32 @@ Graceful shutdown on SIGTERM — both listeners, so WAL checkpoints cleanly on r
 **DNS.** One new record for `write.youwin.dev`. DNS-01 issuance works identically; Caddy
 handles the per-host certificate automatically.
 
-**Build.** You're on Windows and the target is Linux; `sqlx`'s `sqlite` feature bundles
-SQLite through `libsqlite3-sys`, so cross-compiling means a cross C toolchain. Skip it.
-`deploy.sh` builds both frontends locally with pnpm (`public.css` + the SPA), rsyncs the
-tree, runs `cargo build --release` on the server, installs the binary, and restarts the
-unit. Nothing beyond a Rust toolchain and a C compiler is needed there — no database at
-build time, no `cargo sqlx`.
+**Build.** The target is Linux; `sqlx`'s `sqlite` feature bundles SQLite through
+`libsqlite3-sys`, so cross-compiling means a cross C toolchain. Skip it. `deploy.sh` rsyncs
+the tree, runs `cargo build --release` on the server, installs the binary atomically, and
+restarts the unit. Nothing beyond a Rust toolchain and a C compiler is needed there — no
+database at build time, no `cargo sqlx`.
+
+**The deploy runs from WSL2 Debian against the Windows checkout at `/mnt/c`,** which splits
+the build across two machines for one specific reason: `web/node_modules` holds native
+binaries for exactly one platform (`@rollup/rollup-win32-x64-msvc`, `@tailwindcss/oxide`,
+`lightningcss`), and Windows and Linux cannot share one directory of them. So the frontends
+are built in PowerShell and everything else happens in WSL. `deploy.sh` detects whether a
+*native* pnpm exists — `command -v pnpm` succeeding is not enough, because interop puts the
+Windows one on `PATH` — and when it does not, it uses the existing `web/dist` and refuses to
+ship it if any source is newer. That staleness check includes
+`crates/server/src/public/**/*.rs`, since Tailwind scans the maud templates and a `.rs`
+change can alter `public.css`; leaving it out would let a stylesheet ship one deploy behind
+its markup, which looks like a styling bug rather than a build one.
+
+Two more consequences of `/mnt/c`, both of which fail in a way that does not resemble the
+cause. Every file there reports mode **0777**, so `rsync -a` — which implies `-p` — would
+publish a world-writable source tree; `deploy.sh` uses `-rlptz --chmod=D755,F644` instead,
+keeping `-p` precisely so modes are corrected on files left by earlier runs. And `ssh`
+refuses a private key that permissive, so a key under `/mnt/c/…/.ssh` cannot be used in
+place — WSL keeps its own `~/.ssh`. A `.gitattributes` pins `eol=lf` for shell scripts,
+systemd units and the Caddyfile, so a clone on a machine with `core.autocrlf=true` cannot
+produce a `deploy.sh` that dies with `bad interpreter: /bin/bash^M`.
 
 **Backups.** WAL means `cp` of the `.db` file is not a valid backup — the `.db` alone can be
 missing every commit still sitting in the `-wal`. `youwin-backup.timer` runs two things

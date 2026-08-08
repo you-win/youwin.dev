@@ -1,0 +1,19 @@
+# The checkout is on Windows; the things it produces run on Linux. Deploys go
+# out from WSL2, which reads this same working tree through /mnt/c.
+#
+# `core.autocrlf` is false here today, so this changes nothing right now. It
+# exists so that a clone on a machine where it is *true* does not silently
+# produce a deploy.sh that dies with `bad interpreter: /bin/bash^M`, or systemd
+# units and a Caddyfile carrying carriage returns.
+
+* text=auto eol=lf
+
+*.sh          text eol=lf
+*.service     text eol=lf
+*.timer       text eol=lf
+Caddyfile*    text eol=lf
+
+# Binary, and never to be line-ending-converted or diffed as text.
+*.png         binary
+*.ico         binary
+*.db          binary
