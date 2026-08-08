@@ -2,13 +2,19 @@
 #
 # /usr/local/bin/activate-youwin  —  root:root 0755
 #
-# Points /srv/youwin/current at a release, restarts, and proves the site came
-# back. Rolls back on its own if it did not.
+# Points /srv/sites/youwin.dev/current at a release, restarts, and proves the
+# site came back. Rolls back on its own if it did not.
 #
-# CI uploads a release directory as the unprivileged `deploy` user and then runs
-# exactly this, through a sudoers rule scoped to this one command. That is the
-# whole privilege boundary: CI can ship a release and ask for it to be
-# activated, and can do nothing else as root.
+# The sibling of `activate-release`, which serves the static sites on this box.
+# Same layout, same release naming, same atomic symlink swap — but a static site
+# is live the moment the symlink moves, whereas this one has a process to
+# restart and can therefore fail *after* the swap. Hence the smoke test, the
+# health check and the rollback, which is the whole reason it is a separate
+# script rather than an argument to that one.
+#
+# CI uploads a release as the unprivileged `deploy` user and then runs exactly
+# this, through a sudoers rule scoped to this one command. That is the entire
+# privilege boundary:
 #
 #   deploy ALL=(root) NOPASSWD: /usr/local/bin/activate-youwin
 #
@@ -17,7 +23,8 @@
 
 set -euo pipefail
 
-ROOT=/srv/youwin
+SITE=youwin.dev
+ROOT="/srv/sites/$SITE"
 RELEASES="$ROOT/releases"
 CURRENT="$ROOT/current"
 PREVIOUS="$ROOT/previous"
@@ -83,19 +90,22 @@ log "$version"
 # Flip and restart
 # ---------------------------------------------------------------------------
 
+# `ln -sfn` into a staging name, then `mv -T`: rename(2) is atomic, whereas
+# `ln -sfn` directly onto an existing symlink is briefly not. There is no moment
+# where `current` does not resolve.
+swap() {
+  ln -sfn "$1" "$ROOT/.staging"
+  mv -Tf "$ROOT/.staging" "$2"
+}
+
 # Record where we are, so --rollback has somewhere to go. Skipped when
-# activating the release that is already live, which would otherwise make
-# `previous` point at itself.
+# activating the release that is already live, which would otherwise leave
+# `previous` pointing at the same place as `current`.
 if [ -L "$CURRENT" ] && [ "$(readlink -f "$CURRENT")" != "$target" ]; then
-  ln -sfn "$(readlink -f "$CURRENT")" "$PREVIOUS.new"
-  mv -Tf "$PREVIOUS.new" "$PREVIOUS"
+  swap "$(readlink -f "$CURRENT")" "$PREVIOUS"
 fi
 
-# ln -sfn into a temp name then mv -T: mv over a symlink is atomic, whereas
-# `ln -sfn` onto an existing link is briefly not. There is no moment where
-# `current` does not resolve.
-ln -sfn "$target" "$CURRENT.new"
-mv -Tf "$CURRENT.new" "$CURRENT"
+swap "$target" "$CURRENT"
 
 log "restarting youwin"
 systemctl restart youwin
@@ -125,10 +135,10 @@ else
   systemctl status youwin --no-pager --lines 20 >&2 || true
 
   if [ -L "$PREVIOUS" ]; then
-    ln -sfn "$(readlink -f "$PREVIOUS")" "$CURRENT.new"
-    mv -Tf "$CURRENT.new" "$CURRENT"
+    swap "$(readlink -f "$PREVIOUS")" "$CURRENT"
     systemctl restart youwin
-    healthy && printf 'activate-youwin: rolled back to %s\n' "$(basename "$(readlink -f "$CURRENT")")" >&2
+    healthy && printf 'activate-youwin: rolled back to %s\n' \
+      "$(basename "$(readlink -f "$CURRENT")")" >&2
   fi
 
   exit 1
@@ -137,16 +147,26 @@ fi
 # ---------------------------------------------------------------------------
 # Prune
 #
+# Sorted by name rather than by mtime (`ls -1dt`, as the static-site script
+# uses): release names are big-endian UTC timestamps, so lexical order is
+# chronological order, and unlike mtime it cannot be perturbed by rsync
+# preserving timestamps or by a release being re-uploaded.
+#
 # Never removes what `current` or `previous` point at, whatever KEEP says —
-# pruning the release you are running is a way to make `--rollback` useless at
-# exactly the moment it is needed.
+# pruning the release you are running makes --rollback useless at exactly the
+# moment it is needed.
+#
+# `mapfile` rather than a `| while read` pipeline: under `pipefail` a pipeline
+# that selects nothing is an easy way to fail the whole script after the swap
+# has already succeeded.
 # ---------------------------------------------------------------------------
 
 live="$(readlink -f "$CURRENT")"
-prior="$([ -L "$PREVIOUS" ] && readlink -f "$PREVIOUS" || echo '')"
+prior=""
+[ -L "$PREVIOUS" ] && prior="$(readlink -f "$PREVIOUS")"
 
-# shellcheck disable=SC2012 # names here are constrained by the check above
-ls -1 "$RELEASES" | sort | head -n "-$KEEP" | while read -r old; do
+mapfile -t stale < <(cd "$RELEASES" && ls -1 | sort | head -n "-$KEEP")
+for old in ${stale[@]+"${stale[@]}"}; do
   path="$RELEASES/$old"
   [ "$path" = "$live" ] && continue
   [ "$path" = "$prior" ] && continue
@@ -154,4 +174,4 @@ ls -1 "$RELEASES" | sort | head -n "-$KEEP" | while read -r old; do
   rm -rf -- "$path"
 done
 
-log "activated $release"
+log "activated $SITE -> $release"

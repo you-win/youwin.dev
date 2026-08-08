@@ -104,7 +104,7 @@ find "$staging" -type f -exec chmod 644 {} +
 chmod 755 "$staging/bin/youwin-server" "$staging"/deploy/*.sh "$staging/deploy/activate-youwin"
 
 echo "==> Uploading release $REL to $TARGET"
-rsync -rlptDz --delete "$staging/" "$TARGET:/srv/youwin/releases/$REL/"
+rsync -rlptDz --delete "$staging/" "$TARGET:/srv/sites/youwin.dev/releases/$REL/"
 
 echo "==> Activating"
 ssh "$TARGET" "sudo /usr/local/bin/activate-youwin $REL"

@@ -141,7 +141,7 @@ jobs:
           # -rlptD rather than -a: no --owner/--group, which the unprivileged
           # deploy user cannot set anyway.
           rsync -rlptDz --delete \
-            release/ "deploy@$HOST:/srv/youwin/releases/$REL/"
+            release/ "deploy@$HOST:/srv/sites/youwin.dev/releases/$REL/"
 
           # The one privileged operation, through a sudoers rule scoped to this
           # single command. It smoke-tests the binary, flips the symlink,

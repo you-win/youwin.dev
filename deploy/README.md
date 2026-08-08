@@ -29,15 +29,20 @@ and ask for it to be activated. It cannot do anything else on the box.
 
 ## Layout on the server
 
+One directory per site under `/srv/sites`, named for the domain — the same shape
+`timothyyuen.io` uses, so the box has one answer to "where does a site live".
+
 ```
-/srv/youwin/
-├─ releases/20260808-143000-a1b2c3d/
-│  ├─ bin/youwin-server      built in CI; no toolchain on the server
-│  ├─ public/                hashed CSS, favicons, robots.txt
-│  ├─ write/                 the SPA, sw.js, manifest
-│  └─ deploy/                unit files and this document, travelling with the release
-├─ current  -> releases/20260808-143000-a1b2c3d
-└─ previous -> releases/20260807-101500-9f8e7d6
+/srv/sites/
+├─ timothyyuen.io/           static, served straight off the symlink
+└─ youwin.dev/
+   ├─ releases/20260808-143000-a1b2c3d/
+   │  ├─ bin/youwin-server   built in CI; no toolchain on the server
+   │  ├─ public/             hashed CSS, favicons, robots.txt
+   │  ├─ write/              the SPA, sw.js, manifest
+   │  └─ deploy/             unit files and this document, travelling with the release
+   ├─ current  -> releases/20260808-143000-a1b2c3d
+   └─ previous -> releases/20260807-101500-9f8e7d6
 
 /var/lib/youwin/youwin.db    never touched by a deploy
 /var/backups/youwin/         nightly backup + export
@@ -45,8 +50,18 @@ and ask for it to be activated. It cannot do anything else on the box.
 ```
 
 `current` is what the systemd unit and the Caddy roots point at, so the binary
-and the assets it serves change together or not at all. The database lives
-outside all of it and no deploy goes near it.
+and the assets it serves change together or not at all. The database is not in
+`/srv` at all — `/var/lib` is where the FHS puts application state, and no
+deploy goes near it.
+
+**One deliberate difference from the static sites.** There, the site directory
+is owned by `deploy`, which is why `activate-release` needs no `sudo`. Here it is
+owned by `root` and only `releases/` is writable by `deploy`, because `current`
+decides which **binary** systemd executes — and the nightly backup timer runs
+that binary too. A `deploy`-writable `current` would let anything uploaded to
+`releases/` be executed as the `youwin` user without passing the smoke test, the
+health check, or the rollback. Uploading a release and *asking* for it to be
+activated is the intended power; swapping the running binary directly is not.
 
 ## First-time setup
 
@@ -55,24 +70,27 @@ Steps are marked **[server]** (as your admin user, over SSH), **[local]**, or
 
 **1. [server] Users and directories**
 
-Assumes the `deploy` user already exists from the `timothyyuen.io` setup; if
-not, create it the same way — no password, no sudo, one SSH key.
+Assumes `/srv/sites` and the `deploy` user already exist from the
+`timothyyuen.io` setup; if not, create them the same way — `deploy` gets no
+password, no sudo, and one SSH key.
 
 ```bash
-sudo useradd --system --home /srv/youwin --shell /usr/sbin/nologin youwin
-sudo install -d -m 755 -o root   -g root   /srv/youwin /etc/youwin
-sudo install -d -m 755 -o deploy -g deploy /srv/youwin/releases
+sudo useradd --system --home /srv/sites/youwin.dev --shell /usr/sbin/nologin youwin
+sudo install -d -m 755 -o root   -g root   /srv/sites/youwin.dev /etc/youwin
+sudo install -d -m 755 -o deploy -g deploy /srv/sites/youwin.dev/releases
 sudo install -d -m 750 -o youwin -g youwin /var/lib/youwin /var/backups/youwin
 ```
 
-`releases/` is owned by `deploy` — that is the only thing CI can write to.
-`/srv/youwin` itself is root-owned, so the `current` symlink can only be moved
-by the activation script.
+Note the ownership split, which differs from the static sites on purpose: only
+`releases/` belongs to `deploy`, so that is the only thing CI can write to.
+`/srv/sites/youwin.dev` itself is root-owned, so `current` can be moved only by
+the activation script — see "Layout on the server" for why that matters here and
+not there.
 
 **2. [server] The activation script and its sudoers rule**
 
 Get the repo onto the box however you like (`git clone`, or scp the `deploy/`
-directory); after the first deploy it also lives at `/srv/youwin/current/deploy`.
+directory); after the first deploy it also lives at `/srv/sites/youwin.dev/current/deploy`.
 
 ```bash
 sudo install -m 755 -o root -g root deploy/activate-youwin /usr/local/bin/activate-youwin
@@ -127,7 +145,7 @@ cannot start without `YOUWIN_PASSWORD_HASH`. That is expected. Now, on the
 server:
 
 ```bash
-sudo -u youwin /srv/youwin/current/bin/youwin-server hash-password \
+sudo -u youwin /srv/sites/youwin.dev/current/bin/youwin-server hash-password \
   | sudo tee /etc/youwin/secrets.env
 sudo chmod 0600 /etc/youwin/secrets.env
 sudo systemctl enable --now youwin
@@ -241,7 +259,7 @@ Things in there that are load-bearing:
 
 ```bash
 sudo /usr/local/bin/activate-youwin --rollback     # to the previous release
-ls /srv/youwin/releases                            # or pick one
+ls /srv/sites/youwin.dev/releases                            # or pick one
 sudo /usr/local/bin/activate-youwin 20260807-101500-9f8e7d6
 ```
 
@@ -256,7 +274,7 @@ authority — so posts written before a renderer change keep their old HTML.
 indexed until you run
 
 ```bash
-sudo -u youwin /srv/youwin/current/bin/youwin-server rerender
+sudo -u youwin /srv/sites/youwin.dev/current/bin/youwin-server rerender
 ```
 
 Idempotent, safe at any time, and it does not mark anything as edited.
@@ -309,8 +327,8 @@ turning every platform switch into a full rebuild.
 ```bash
 systemctl status youwin
 journalctl -u youwin -f
-readlink -f /srv/youwin/current                 # which release is live
-/srv/youwin/current/bin/youwin-server version   # which commit it was built from
+readlink -f /srv/sites/youwin.dev/current                 # which release is live
+/srv/sites/youwin.dev/current/bin/youwin-server version   # which commit it was built from
 curl -fsS http://127.0.0.1:8080/health          # public listener + read pool
 curl -fsS http://127.0.0.1:8081/api/health      # authoring listener + write pool
 ```
@@ -364,7 +382,7 @@ rsync -avz youwin-admin@server.example:/var/backups/youwin/ /mnt/c/Users/theaz/b
 ## Rotating the password — [server]
 
 ```bash
-sudo -u youwin /srv/youwin/current/bin/youwin-server hash-password \
+sudo -u youwin /srv/sites/youwin.dev/current/bin/youwin-server hash-password \
   | sudo tee /etc/youwin/secrets.env
 sudo systemctl restart youwin
 ```

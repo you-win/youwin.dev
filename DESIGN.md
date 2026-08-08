@@ -790,18 +790,28 @@ handles the per-host certificate automatically.
 test suite, builds the binary, ships a release directory, and asks the server to activate
 it. The server has no build toolchain at all — no Rust, no C compiler, no source tree.
 
-**Releases are directories and `current` is a symlink**, matching the pattern already in use
-for `timothyyuen.io`:
+**Releases are directories and `current` is a symlink**, in the same layout the static sites
+on the box already use — one directory per site under `/srv/sites`, named for the domain:
 
 ```
-/srv/youwin/releases/<utc-timestamp>-<sha>/{bin,public,write,deploy}
-/srv/youwin/current  -> releases/…      what systemd and the Caddy roots point at
-/srv/youwin/previous -> releases/…      what --rollback goes back to
+/srv/sites/youwin.dev/releases/<utc-timestamp>-<sha>/{bin,public,write,deploy}
+/srv/sites/youwin.dev/current  -> releases/…   what systemd and the Caddy roots point at
+/srv/sites/youwin.dev/previous -> releases/…   what --rollback goes back to
 ```
 
 The binary and the assets it serves therefore change together or not at all. systemd
-resolves `ExecStart` at start time, so the restart is the cutover. The database is at
-`/var/lib/youwin` and no deploy goes near it.
+resolves `ExecStart` at start time, so the restart is the cutover. The database is not under
+`/srv` at all — `/var/lib` is where the FHS puts application state — and no deploy goes near
+it.
+
+**Ownership deviates from the static sites deliberately.** There the site directory belongs
+to `deploy`, which is why `activate-release` needs no `sudo` at all. Here it belongs to
+`root` and only `releases/` is `deploy`-writable, because `current` selects the **binary**
+systemd executes — and the nightly backup timer runs that binary too. A `deploy`-writable
+`current` would mean anything uploaded to `releases/` could be executed as the `youwin` user
+without passing the smoke test, the health check, or the rollback. Uploading a release and
+*asking* for it to be activated is the intended power; swapping the running binary directly
+is not.
 
 **The privilege boundary is one sudoers line.** CI authenticates as an unprivileged `deploy`
 user that can write only to `releases/`, and may run exactly one command as root:
