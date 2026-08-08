@@ -48,6 +48,20 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * The server could not be reached at all.
+ *
+ * Distinct from `ApiError` on purpose: "the server said no" and "there is no
+ * server right now" call for opposite responses. Conflating them signs you out
+ * every time you walk into a tunnel.
+ */
+export class NetworkError extends Error {
+  constructor(message = "Could not reach the server.") {
+    super(message);
+    this.name = "NetworkError";
+  }
+}
+
 let onUnauthorized: (() => void) | null = null;
 
 /** Registered once by the app shell; see `app.tsx`. */
@@ -60,11 +74,19 @@ async function request<T>(
   path: string,
   body?: unknown,
 ): Promise<T> {
-  const response = await fetch(path, {
-    method,
-    headers: body === undefined ? {} : { "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method,
+      headers: body === undefined ? {} : { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    // fetch rejects only when the request never completed — offline, DNS
+    // failure, connection refused. An HTTP error status resolves normally and
+    // is handled below.
+    throw new NetworkError();
+  }
 
   if (response.status === 401) {
     // One place handles expiry. Components see a thrown error and can ignore it;
@@ -140,4 +162,44 @@ export const api = {
 /** Where a post lives, or will live, on the public site. */
 export function previewUrl(id: string) {
   return `/preview/${encodeURIComponent(id)}`;
+}
+
+/**
+ * The deployed public site.
+ *
+ * Hardcoded rather than derived from `location`: a shared link must point at
+ * youwin.dev whether it was composed from the deployed app or from localhost.
+ */
+export const PUBLIC_ORIGIN = "https://youwin.dev";
+
+export function publicUrl(id: string) {
+  return `${PUBLIC_ORIGIN}/p/${encodeURIComponent(id)}`;
+}
+
+/**
+ * Shares a post's public URL, falling back to the clipboard.
+ *
+ * Resolves to what actually happened so the caller can confirm a copy — a share
+ * sheet is self-evident, a silent clipboard write is not.
+ */
+export async function share(id: string): Promise<"shared" | "copied" | "failed"> {
+  const url = publicUrl(id);
+
+  if (navigator.share) {
+    try {
+      await navigator.share({ url });
+      return "shared";
+    } catch (e) {
+      // Dismissing the sheet throws AbortError; that is a choice, not a failure,
+      // so it must not fall through to a surprise clipboard write.
+      if (e instanceof DOMException && e.name === "AbortError") return "failed";
+    }
+  }
+
+  try {
+    await navigator.clipboard.writeText(url);
+    return "copied";
+  } catch {
+    return "failed";
+  }
 }

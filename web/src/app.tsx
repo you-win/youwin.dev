@@ -7,9 +7,10 @@ import {
   useNavigate,
   type RouteSectionProps,
 } from "@solidjs/router";
-import { onMount, Show } from "solid-js";
+import { createSignal, onCleanup, onMount, Show } from "solid-js";
 
 import { setUnauthorizedHandler } from "./lib/api";
+import { initPwa, install, installable, update, updateReady } from "./lib/pwa";
 import { clearSession, loadSession, session } from "./lib/session";
 import Drafts from "./routes/Drafts";
 import Feed from "./routes/Feed";
@@ -27,9 +28,11 @@ import Settings from "./routes/Settings";
 function Shell(props: RouteSectionProps) {
   const location = useLocation();
   const navigate = useNavigate();
+  const [offline, setOffline] = createSignal(!navigator.onLine);
 
   onMount(() => {
     void loadSession();
+    initPwa();
 
     // Any 401, from any request, lands here — so no component has to handle an
     // expired session, and none of them can forget to.
@@ -38,6 +41,15 @@ function Shell(props: RouteSectionProps) {
       if (location.pathname !== "/login") {
         navigate("/login", { replace: true });
       }
+    });
+
+    const online = () => setOffline(false);
+    const dropped = () => setOffline(true);
+    window.addEventListener("online", online);
+    window.addEventListener("offline", dropped);
+    onCleanup(() => {
+      window.removeEventListener("online", online);
+      window.removeEventListener("offline", dropped);
     });
   });
 
@@ -51,6 +63,15 @@ function Shell(props: RouteSectionProps) {
             write
           </A>
           <nav class="flex items-center gap-4 text-sm text-secondary">
+            <Show when={installable()}>
+              <button
+                type="button"
+                class="btn btn-ghost btn-xs text-primary"
+                onClick={() => void install()}
+              >
+                install
+              </button>
+            </Show>
             <A href="/drafts">drafts</A>
             <A href="/settings">settings</A>
             <a
@@ -63,6 +84,28 @@ function Shell(props: RouteSectionProps) {
             </a>
           </nav>
         </header>
+      </Show>
+
+      {/* Offline is worth saying plainly: the feed still reads from cache, but
+          posting will fail, and finding that out by losing a draft is not the
+          way to learn it. */}
+      <Show when={offline()}>
+        <div class="mt-4 rounded-box border border-warning/40 bg-warning/10 px-4 py-2 text-sm text-warning">
+          Offline. You can read, but posting will not work until you reconnect.
+        </div>
+      </Show>
+
+      <Show when={updateReady()}>
+        <div class="mt-4 flex items-center justify-between gap-3 rounded-box border border-primary/40 bg-base-200 px-4 py-2 text-sm">
+          <span>A new version is ready.</span>
+          <button
+            type="button"
+            class="btn btn-primary btn-xs"
+            onClick={() => void update()}
+          >
+            Reload
+          </button>
+        </div>
       </Show>
 
       <main class="flex-1 py-8">

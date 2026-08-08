@@ -3,6 +3,7 @@ import { createSignal, Show } from "solid-js";
 
 import { api } from "../lib/api";
 import { absolute } from "../lib/format";
+import { clearApiCache, isStandalone } from "../lib/pwa";
 import { clearSession, session } from "../lib/session";
 
 export default function Settings() {
@@ -18,6 +19,9 @@ export default function Settings() {
       } else {
         await api.logout();
       }
+      // Every route on this origin is authenticated, so a stale API cache is the
+      // one way a signed-out device could still show posts.
+      await clearApiCache();
       clearSession();
       navigate("/login", { replace: true });
     } finally {
@@ -40,6 +44,10 @@ export default function Settings() {
               <div class="flex justify-between gap-4">
                 <dt class="text-secondary">Active sessions</dt>
                 <dd>{me().active_sessions}</dd>
+              </div>
+              <div class="flex justify-between gap-4">
+                <dt class="text-secondary">Running as</dt>
+                <dd>{isStandalone() ? "Installed app" : "Browser tab"}</dd>
               </div>
             </dl>
           </section>

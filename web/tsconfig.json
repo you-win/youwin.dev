@@ -19,7 +19,9 @@
     "skipLibCheck": true,
     "noEmit": true,
 
-    "types": ["vite/client"]
+    // `vite-plugin-pwa/client` declares the virtual:pwa-register module the
+    // shell imports to drive updates.
+    "types": ["vite/client", "vite-plugin-pwa/client"]
   },
   "include": ["src", "vite.config.ts", "vite.public.config.ts"]
 }

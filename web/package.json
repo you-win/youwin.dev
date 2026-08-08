@@ -7,6 +7,8 @@
     "build": "pnpm run build:public && pnpm run build:app",
     "build:app": "vite build",
     "build:public": "vite build --config vite.public.config.ts",
+    "preview": "vite preview",
+    "icons": "node scripts/generate-icons.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -19,6 +21,8 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^8.2.1",
-    "vite-plugin-solid": "^2.11.14"
+    "vite-plugin-pwa": "^1.3.0",
+    "vite-plugin-solid": "^2.11.14",
+    "workbox-window": "^7.4.1"
   }
 }

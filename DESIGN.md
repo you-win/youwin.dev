@@ -482,20 +482,55 @@ per-request HTML on this origin.
 ## PWA
 
 `vite-plugin-pwa` (`generateSW`). `display: standalone`, `theme_color` matching
-`base-100`, 192/512 icons plus a maskable variant.
+`base-100`, 192/512 icons plus a maskable variant, all generated from the palette by
+[`web/scripts/generate-icons.mjs`](web/scripts/generate-icons.mjs) — a committed script
+rather than a folder of binaries nobody can regenerate when the theme moves.
 
 Because **every route on this origin is authenticated**, the usual rules collapse: there
-is no public content to accidentally cache and no logout-purge dance to get right. What's
-left:
+is no public content to accidentally cache. What's left:
 
-- **`navigateFallbackDenylist: [/^\/api\//]`.** Without it the SW answers API calls with
-  the HTML shell and every fetch fails at `JSON.parse`.
-- `NetworkFirst` for `GET /api/feed` and `GET /api/posts/*` — the last-seen feed stays
-  readable in a tunnel. `CacheFirst` for hashed assets. Non-`GET` never touches the SW.
-- On logout, `caches.delete()` the API cache anyway. Cheap, and it means a shared or
-  stolen device doesn't show the last feed.
+- **`navigateFallbackDenylist: [/^\/api\//, /^\/preview\//]`.** Without the first, the SW
+  answers API calls with the HTML shell and every fetch dies at `JSON.parse`. The second
+  matters for the opposite reason: `/preview` is *server-rendered HTML on this origin*, not
+  an SPA route, so the shell must not stand in for it.
+- `NetworkFirst` for `GET /api/posts*` only, in a `youwin-api` cache. `/api/auth/*` is
+  deliberately absent — caching it would let a signed-out device keep answering as though
+  it were signed in. `method: "GET"` means a POST/PATCH/DELETE never reaches the worker.
+- On sign-out, `caches.delete("youwin-api")`. The cache name is written in two places
+  (`vite.config.ts` and `lib/pwa.ts`) and they must stay in step.
 - `sw.js` and `manifest.webmanifest` are served `no-cache` (see the Caddy block), or a
   stale SW pins an old build indefinitely.
+
+**Updates are offered, not applied.** `registerType: "prompt"` with `skipWaiting: false`
+and `clientsClaim: false`: a new build sits in *waiting* until the shell's Reload button
+posts `SKIP_WAITING`. An automatic reload can land mid-sentence and take an unposted draft
+with it — the one loss this app must not risk. The cost is that a freshly installed worker
+does not control the page until the next navigation, which is the correct trade.
+
+Four things that cost real time to find, all verified against `pnpm run preview`:
+
+- **`registerSW({ immediate: true })` is load-bearing.** By default it defers registration
+  to the window `load` event, but `initPwa()` runs from Solid's `onMount`, which in a
+  production build can fire *after* load has passed — so the listener never runs and the
+  worker never registers. Dev hides this completely, because the plugin injects its own
+  registration there. The symptom is a PWA that installs but has no offline support and
+  never offers an update.
+- **The dev service worker omits `runtimeCaching`.** `devOptions` generates a stripped
+  worker that honours `navigateFallback` and nothing else, so the API cache does not exist
+  in dev. Concluding "caching is broken" from a dev session would be wrong; verify against
+  the preview build.
+- **`vite preview` needs a *different* proxy from the dev server.** In dev, Vite serves
+  modules from `/src` and never touches `/assets`, so that prefix can be forwarded whole.
+  In preview the SPA's own bundle lives under `/assets`, and forwarding it sends the app's
+  JavaScript to the public listener — nothing mounts at all. Preview forwards only
+  `/assets/public-`, which is exactly what the Caddy write block does.
+- **Offline must distinguish "unreachable" from "401".** Because `/api/auth/me` is never
+  cached, it fails offline; treating that failure as "signed out" bounces you to a login
+  form that cannot be submitted, while a perfectly readable cached feed sits behind it.
+  `api.ts` throws a distinct `NetworkError`, and `loadSession` falls back to the last
+  server-confirmed session in `localStorage`. That fallback is safe because the only way to
+  have one is to have signed in on this device, and signing out clears it alongside the
+  cache.
 
 ## Theme — "mistwood"
 
@@ -679,7 +714,7 @@ policy, since it survives SQLite itself.
 | **M1** | **The entire public site** | ✅ **Done.** `youwin-server seed`, maud templates, feed + cursor pagination, permalinks, threads, Atom, markdown pipeline, asset-manifest lookup, themed 404. 26 tests green, covering every statement in `db/`. *Still to do before it is actually live: put the Caddy block and the Cloudflare cache rule on the box, alongside M2.* |
 | **M2** | Auth | ✅ **Code done.** `hash-password`, login, sessions, structural guard, throttling, Origin check. 61 tests green. Deploy artifacts written to [`deploy/`](deploy/README.md) — **installing them on the server is still outstanding**, including the Cloudflare cache rule without which M1's caching headers are inert |
 | **M3** | Authoring app | ✅ **Done.** Solid SPA — composer with optimistic insert, inline edit, create/edit/soft-delete, drafts, replies, `/preview/:id` through the public templates. 81 tests green |
-| **M4** | PWA | Manifest, service worker, offline feed, install prompt, share sheet |
+| **M4** | PWA | ✅ **Done.** Generated icons, manifest, service worker, offline feed, update prompt, install prompt, share sheet. Offline verified against `pnpm run preview` with every server stopped |
 | **M5** | Polish | FTS5 search, hashtags, `export`, backup timer, optional cache purge on write |
 
 The split changes the shape of the plan more than anything else: **M1 ships a complete,

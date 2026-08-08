@@ -1,7 +1,13 @@
 import { A } from "@solidjs/router";
 import { createSignal, Show } from "solid-js";
 
-import { api, previewUrl, type Post, type Visibility } from "../lib/api";
+import {
+  api,
+  previewUrl,
+  share,
+  type Post,
+  type Visibility,
+} from "../lib/api";
 import { absolute, relative } from "../lib/format";
 import Composer from "./Composer";
 
@@ -27,6 +33,7 @@ export default function PostCard(props: Props) {
   const [replying, setReplying] = createSignal(false);
   const [confirming, setConfirming] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
+  const [shared, setShared] = createSignal<string | null>(null);
 
   const badge = () => VISIBILITY_LABEL[props.post.visibility];
 
@@ -164,6 +171,23 @@ export default function PostCard(props: Props) {
           >
             Preview
           </a>
+
+          {/* A draft has no public URL yet, so there is nothing to share. */}
+          <Show when={props.post.visibility !== "draft"}>
+            <button
+              type="button"
+              class="btn btn-ghost btn-xs"
+              onClick={async () => {
+                const outcome = await share(props.post.id);
+                if (outcome === "shared") return;
+                // A share sheet is self-evident; a silent clipboard write is not.
+                setShared(outcome === "copied" ? "Link copied" : "Could not share");
+                setTimeout(() => setShared(null), 2000);
+              }}
+            >
+              {shared() ?? "Share"}
+            </button>
+          </Show>
 
           <Show when={props.post.visibility === "draft"}>
             <button

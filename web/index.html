@@ -13,6 +13,14 @@
 
     <!-- The authoring app is never indexed and never linked publicly. -->
     <meta name="robots" content="noindex, nofollow" />
+
+    <!-- vite-plugin-pwa injects the manifest link; these are the ones iOS needs,
+         which it looks for by tag rather than reading the manifest. -->
+    <link rel="icon" href="/icons/icon-192.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="write" />
   </head>
   <body>
     <div id="root"></div>
