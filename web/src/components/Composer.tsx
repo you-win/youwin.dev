@@ -1,6 +1,6 @@
-import { createSignal, Show } from "solid-js";
+import { createSignal, For, Show } from "solid-js";
 
-import type { Visibility } from "../lib/api";
+import { MOODS, type Mood, type Visibility } from "../lib/api";
 
 /** Soft limit: the meter turns amber past this, but the post is still allowed. */
 const SOFT_LIMIT = 500;
@@ -8,14 +8,35 @@ const SOFT_LIMIT = 500;
 /** Hard limit, mirroring the server's. Exceeding it disables posting. */
 const HARD_LIMIT = 4000;
 
+/**
+ * Sentence case for the picker, since it sits beside "Public"/"Unlisted".
+ *
+ * Spelled out rather than capitalized in CSS: `text-transform` on `<option>` is
+ * ignored by several browsers, and this is seven words.
+ */
+const MOOD_LABEL: Record<Mood, string> = {
+  content: "Content",
+  contemplative: "Contemplative",
+  tired: "Tired",
+  excited: "Excited",
+  melancholy: "Melancholy",
+  chaos: "Chaos",
+  neutral: "Neutral",
+};
+
 interface Props {
   /** Resolves once the post is stored; rejects to leave the draft in place. */
-  onSubmit: (body: string, visibility: Visibility) => Promise<void>;
+  onSubmit: (
+    body: string,
+    visibility: Visibility,
+    mood: Mood | null,
+  ) => Promise<void>;
   placeholder?: string;
   submitLabel?: string;
   /** Replies are always public — a draft reply to a published post is a muddle. */
   allowDraft?: boolean;
   initialBody?: string;
+  initialMood?: Mood | null;
   autofocus?: boolean;
   onCancel?: () => void;
 }
@@ -23,6 +44,7 @@ interface Props {
 export default function Composer(props: Props) {
   const [body, setBody] = createSignal(props.initialBody ?? "");
   const [visibility, setVisibility] = createSignal<Visibility>("public");
+  const [mood, setMood] = createSignal<Mood | null>(props.initialMood ?? null);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
@@ -47,9 +69,10 @@ export default function Composer(props: Props) {
     setBusy(true);
     setError(null);
     try {
-      await props.onSubmit(body(), visibility());
+      await props.onSubmit(body(), visibility(), mood());
       setBody("");
       setVisibility("public");
+      setMood(null);
       queueMicrotask(resize);
     } catch (e) {
       // The text stays in the box. Losing a post to a failed request would be
@@ -118,6 +141,7 @@ export default function Composer(props: Props) {
               class="select select-sm border-base-300 bg-base-100"
               value={visibility()}
               disabled={busy()}
+              aria-label="Visibility"
               onChange={(event) =>
                 setVisibility(event.currentTarget.value as Visibility)
               }
@@ -127,6 +151,26 @@ export default function Composer(props: Props) {
               <option value="draft">Draft</option>
             </select>
           </Show>
+
+          {/* Feeds the familiar on youwin.dev and appears nowhere else. Left
+              alone, the pet reads the text instead — which is why the empty
+              option says "no mood" rather than defaulting to Neutral, a value
+              that deliberately means something different. */}
+          <select
+            class="select select-sm border-base-300 bg-base-100"
+            value={mood() ?? ""}
+            disabled={busy()}
+            aria-label="Mood"
+            title="Feeds the familiar. Not shown on the post."
+            onChange={(event) =>
+              setMood((event.currentTarget.value || null) as Mood | null)
+            }
+          >
+            <option value="">Mood…</option>
+            <For each={MOODS}>
+              {(name) => <option value={name}>{MOOD_LABEL[name]}</option>}
+            </For>
+          </select>
         </div>
 
         <div class="flex items-center gap-2">

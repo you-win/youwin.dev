@@ -20,6 +20,7 @@ use crate::{
         search,
     },
     error::AppError,
+    mood::Mood,
     write::WriteState,
 };
 
@@ -37,6 +38,9 @@ pub struct PostDto {
     body: String,
     body_html: String,
     visibility: &'static str,
+    /// `null` when no mood was picked. The composer needs to tell that apart
+    /// from a picked "neutral", because the familiar does.
+    mood: Option<&'static str>,
     is_reply: bool,
     reply_count: i64,
     created_at: i64,
@@ -50,6 +54,7 @@ impl From<&AuthoredRow> for PostDto {
             body: row.body.clone(),
             body_html: row.post.body_html.clone(),
             visibility: row.post.visibility.as_str(),
+            mood: row.post.mood.map(Mood::as_str),
             is_reply: row.post.parent_id.is_some(),
             reply_count: row.reply_count,
             created_at: row.post.created_at,
@@ -78,6 +83,10 @@ pub struct CreateRequest {
     parent_id: Option<String>,
     #[serde(default = "default_visibility")]
     visibility: Visibility,
+    /// Absent or `null` means the picker was left alone, and the familiar will
+    /// infer one from the text.
+    #[serde(default)]
+    mood: Option<Mood>,
 }
 
 fn default_visibility() -> Visibility {
@@ -90,6 +99,25 @@ pub struct UpdateRequest {
     /// which would be a request to blank the post and is rejected.
     body: Option<String>,
     visibility: Option<Visibility>,
+    /// Three states, so two layers of `Option`: the key absent leaves the mood
+    /// alone, `null` clears it, and a name sets it. One layer cannot express
+    /// "put this post back to having no mood".
+    #[serde(default, deserialize_with = "explicit_null")]
+    mood: Option<Option<Mood>>,
+}
+
+/// Deserializes a present-but-possibly-null field into `Some(_)`, leaving an
+/// absent field as `None` via `#[serde(default)]`.
+///
+/// serde collapses both to `None` otherwise, which is the whole difficulty:
+/// `{"mood": null}` and `{}` are different requests and only one of them means
+/// "clear it".
+fn explicit_null<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer).map(Some)
 }
 
 fn validate_body(body: &str) -> Result<(), AppError> {
@@ -203,6 +231,7 @@ pub async fn create(
         &body.body,
         parent_id,
         body.visibility,
+        body.mood,
         now_millis(),
     )
     .await?;
@@ -224,7 +253,7 @@ pub async fn update(
     Path(public_id): Path<String>,
     Json(body): Json<UpdateRequest>,
 ) -> Result<Json<PostDto>, AppError> {
-    if body.body.is_none() && body.visibility.is_none() {
+    if body.body.is_none() && body.visibility.is_none() && body.mood.is_none() {
         return Err(AppError::Invalid("Nothing to change."));
     }
     if let Some(text) = &body.body {
@@ -236,6 +265,7 @@ pub async fn update(
         &public_id,
         body.body.as_deref(),
         body.visibility,
+        body.mood,
         now_millis(),
     )
     .await?;

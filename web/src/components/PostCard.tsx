@@ -5,6 +5,7 @@ import {
   api,
   previewUrl,
   share,
+  type Mood,
   type Post,
   type Visibility,
 } from "../lib/api";
@@ -37,8 +38,10 @@ export default function PostCard(props: Props) {
 
   const badge = () => VISIBILITY_LABEL[props.post.visibility];
 
-  const save = async (body: string) => {
-    const updated = await api.update(props.post.id, { body });
+  // Sent on every save, including as an explicit null, so clearing a mood back
+  // to "did not say" is expressible — omitting the key would mean "leave it".
+  const save = async (body: string, _visibility: Visibility, mood: Mood | null) => {
+    const updated = await api.update(props.post.id, { body, mood });
     props.onChanged?.(updated);
     setEditing(false);
   };
@@ -65,8 +68,12 @@ export default function PostCard(props: Props) {
     }
   };
 
-  const reply = async (body: string) => {
-    const created = await api.create(body, "public", props.post.id);
+  const reply = async (
+    body: string,
+    _visibility: Visibility,
+    mood: Mood | null,
+  ) => {
+    const created = await api.create(body, "public", mood, props.post.id);
     props.onReply?.(created);
     setReplying(false);
   };
@@ -93,6 +100,17 @@ export default function PostCard(props: Props) {
           <span title="Edited after publishing">· edited</span>
         </Show>
 
+        {/* Shown here and nowhere on youwin.dev. Without it the mood is
+            invisible until you open the editor, which is most of what made the
+            hashtag version hard to keep track of. */}
+        <Show when={props.post.mood}>
+          {(mood) => (
+            <span title="Mood — feeds the familiar, not shown publicly">
+              · {mood()}
+            </span>
+          )}
+        </Show>
+
         <Show when={badge()}>
           {(label) => (
             <span class="badge badge-sm border-base-300 bg-base-300 text-accent">
@@ -111,6 +129,7 @@ export default function PostCard(props: Props) {
         fallback={
           <Composer
             initialBody={props.post.body}
+            initialMood={props.post.mood}
             submitLabel="Save"
             allowDraft={false}
             autofocus

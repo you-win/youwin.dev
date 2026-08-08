@@ -38,7 +38,7 @@ pub fn widget(reading: &Reading) -> Markup {
                     p { "the familiar" }
                     p class="text-secondary" { "waiting for a first post" }
                 } @else {
-                    p { (state.mood.label()) " · " (state.level.label()) }
+                    p { (state.mood.as_str()) " · " (state.level.label()) }
                     p class="text-secondary" {
                         (state.stage.label()) " " (state.form.label())
                         " · " (state.phase.label()) " hours"
@@ -67,7 +67,7 @@ pub fn sheet(reading: &Reading) -> Markup {
                     @if state.stage == Stage::Egg {
                         "waiting for a first post"
                     } @else {
-                        (state.mood.label()) " · " (state.level.label())
+                        (state.mood.as_str()) " · " (state.level.label())
                         span class="text-secondary" { " · " (state.phase.label()) " hours" }
                     }
                 }
@@ -90,7 +90,7 @@ pub fn sheet(reading: &Reading) -> Markup {
             @if reading.moods.len() > 1 {
                 (panel("moods", html! {
                     @for (mood, share) in reading.moods.iter().take(4) {
-                        (meter(mood.label(), percent(*share)))
+                        (meter(mood.as_str(), percent(*share)))
                     }
                 }))
             }

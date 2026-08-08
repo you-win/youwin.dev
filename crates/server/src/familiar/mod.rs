@@ -30,17 +30,22 @@ pub mod topics;
 
 pub use cache::{Familiar, Reading};
 
+/// The mood a post was written in. Owned by the crate, not by the pet — see
+/// [`crate::mood`].
+pub use crate::mood::Mood;
+
 /// One post, reduced to what the familiar reads.
 ///
 /// Carries `FromRow` so the state machine's own input type is the row shape too,
 /// while the SQL that fills it stays in `db::familiar` with every other
-/// statement. `body_text` is the plaintext projection, which keeps `#hashtags`
-/// verbatim — that is what lets [`mood`] see an explicit mood tag without a
-/// second query.
+/// statement.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Morsel {
     pub created_at: i64,
     pub body_text: String,
+    /// What the writer picked in the composer, or `None` if they picked nothing
+    /// — in which case [`mood::infer`] reads the text instead.
+    pub mood: Option<Mood>,
 }
 
 /// The five silhouettes. One per topic that has one — `daily` deliberately does
@@ -204,54 +209,6 @@ impl Blend {
             .filter(|w| **w > 0.0)
             .map(|w| w * w.log2())
             .sum::<f64>()
-    }
-}
-
-/// The writer's most recent legible emotional state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mood {
-    Content,
-    Contemplative,
-    Tired,
-    Excited,
-    Melancholy,
-    Chaos,
-    Neutral,
-}
-
-impl Mood {
-    pub const ALL: [Self; 7] = [
-        Self::Content,
-        Self::Contemplative,
-        Self::Tired,
-        Self::Excited,
-        Self::Melancholy,
-        Self::Chaos,
-        Self::Neutral,
-    ];
-
-    const fn index(self) -> usize {
-        match self {
-            Self::Content => 0,
-            Self::Contemplative => 1,
-            Self::Tired => 2,
-            Self::Excited => 3,
-            Self::Melancholy => 4,
-            Self::Chaos => 5,
-            Self::Neutral => 6,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Content => "content",
-            Self::Contemplative => "contemplative",
-            Self::Tired => "tired",
-            Self::Excited => "excited",
-            Self::Melancholy => "melancholy",
-            Self::Chaos => "chaos",
-            Self::Neutral => "neutral",
-        }
     }
 }
 
@@ -485,10 +442,20 @@ pub(crate) mod fixture {
     /// tests reads as the hour it says.
     pub const START: i64 = 1_785_888_000_000;
 
+    /// A post with no mood picked, so the familiar infers one from the text.
     pub fn post(at: i64, body_text: &str) -> Morsel {
         Morsel {
             created_at: at,
             body_text: body_text.to_owned(),
+            mood: None,
+        }
+    }
+
+    /// A post whose mood was chosen in the composer.
+    pub fn post_feeling(at: i64, body_text: &str, mood: super::Mood) -> Morsel {
+        Morsel {
+            mood: Some(mood),
+            ..post(at, body_text)
         }
     }
 

@@ -26,7 +26,7 @@ use crate::familiar::Morsel;
 // splits on `/familiar` are over the whole archive, so a window would have to be
 // two queries to buy nothing.
 const ALL: &str = "
-    SELECT created_at, body_text
+    SELECT created_at, body_text, mood
       FROM posts
      WHERE deleted_at IS NULL AND visibility = 'public'
      ORDER BY created_at ASC, id ASC";

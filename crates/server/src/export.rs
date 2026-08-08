@@ -114,6 +114,9 @@ fn document(entry: &Entry) -> String {
     out.push_str(&format!("date: {}\n", time_fmt::rfc3339(post.created_at)));
     out.push_str(&format!("visibility: {}\n", post.visibility.as_str()));
 
+    if let Some(mood) = post.mood {
+        out.push_str(&format!("mood: {}\n", mood.as_str()));
+    }
     if let Some(edited) = post.edited_at {
         out.push_str(&format!("edited: {}\n", time_fmt::rfc3339(edited)));
     }

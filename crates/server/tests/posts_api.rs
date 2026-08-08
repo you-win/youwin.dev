@@ -479,3 +479,141 @@ async fn the_harness_password_is_the_one_the_app_expects(pool: SqlitePool) {
     assert_eq!(PASSWORD, "correct horse battery staple");
     let _ = login(&app).await;
 }
+
+#[sqlx::test]
+async fn a_post_carries_the_mood_it_was_created_with(pool: SqlitePool) {
+    let app = common::app(pool);
+    let cookie = login(&app).await;
+
+    let reply = send(
+        &app,
+        json_request(
+            "POST",
+            "/api/posts",
+            r#"{"body":"shipped it","mood":"excited"}"#,
+            Some(&cookie),
+        ),
+    )
+    .await;
+
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    assert_eq!(reply.json()["mood"], "excited");
+
+    // Absent means the picker was left alone, which the client has to be able to
+    // tell apart from a picked "neutral".
+    let plain = send(
+        &app,
+        json_request("POST", "/api/posts", r#"{"body":"no mood"}"#, Some(&cookie)),
+    )
+    .await;
+    assert_eq!(plain.status, StatusCode::CREATED, "{}", plain.body);
+    assert!(plain.json()["mood"].is_null(), "{}", plain.body);
+}
+
+#[sqlx::test]
+async fn patching_distinguishes_leaving_a_mood_from_clearing_it(pool: SqlitePool) {
+    let app = common::app(pool);
+    let cookie = login(&app).await;
+
+    let created = send(
+        &app,
+        json_request(
+            "POST",
+            "/api/posts",
+            r#"{"body":"a first take","mood":"tired"}"#,
+            Some(&cookie),
+        ),
+    )
+    .await;
+    let id = created.json()["id"].as_str().expect("id").to_owned();
+
+    // The key absent: untouched. Editing the body must not wipe the mood.
+    let edited = send(
+        &app,
+        json_request(
+            "PATCH",
+            &format!("/api/posts/{id}"),
+            r#"{"body":"a second take"}"#,
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+    assert_eq!(edited.json()["mood"], "tired");
+
+    // A name: set.
+    let changed = send(
+        &app,
+        json_request(
+            "PATCH",
+            &format!("/api/posts/{id}"),
+            r#"{"mood":"melancholy"}"#,
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(changed.status, StatusCode::OK, "{}", changed.body);
+    assert_eq!(changed.json()["mood"], "melancholy");
+
+    // An explicit null: cleared. This is the request `#[serde(default)]` alone
+    // would have made indistinguishable from the first one.
+    let cleared = send(
+        &app,
+        json_request(
+            "PATCH",
+            &format!("/api/posts/{id}"),
+            r#"{"mood":null}"#,
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.body);
+    assert!(cleared.json()["mood"].is_null(), "{}", cleared.body);
+}
+
+#[sqlx::test]
+async fn a_mood_on_its_own_is_a_change_and_a_bad_one_is_rejected(pool: SqlitePool) {
+    let app = common::app(pool);
+    let cookie = login(&app).await;
+    let id = create_post(&app, &cookie, "a post", "public").await;
+
+    // An empty PATCH is still nothing to do, but a mood alone is a real edit —
+    // the guard has to know about the third field.
+    let empty = send(
+        &app,
+        json_request("PATCH", &format!("/api/posts/{id}"), "{}", Some(&cookie)),
+    )
+    .await;
+    assert_eq!(empty.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", empty.body);
+
+    let only_mood = send(
+        &app,
+        json_request(
+            "PATCH",
+            &format!("/api/posts/{id}"),
+            r#"{"mood":"chaos"}"#,
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(only_mood.status, StatusCode::OK, "{}", only_mood.body);
+
+    // A name that is not one of the seven is a 422 from serde, not a 500 and not
+    // a silently stored value.
+    let nonsense = send(
+        &app,
+        json_request(
+            "PATCH",
+            &format!("/api/posts/{id}"),
+            r#"{"mood":"smug"}"#,
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert!(
+        nonsense.status.is_client_error(),
+        "expected a 4xx, got {}: {}",
+        nonsense.status,
+        nonsense.body,
+    );
+}

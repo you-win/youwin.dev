@@ -74,7 +74,7 @@ nothing. In dev, Vite proxies `/api` to `127.0.0.1:8081` so cookies behave as in
 youwin.dev/
 ├─ Cargo.toml
 ├─ crates/server/
-│  ├─ migrations/             # 0001_init, 0002_search_and_tags — sqlx::migrate!(), no CLI
+│  ├─ migrations/             # 0001_init, 0002_search_and_tags, 0003_post_mood — no CLI
 │  ├─ tests/                  # one per statement in db/, plus the router integration tests
 │  └─ src/
 │     ├─ lib.rs               # the crate proper — a lib so tests can reach the modules
@@ -85,6 +85,7 @@ youwin.dev/
 │     ├─ backup.rs            # `backup` — VACUUM INTO, dated, 30 kept            (M5)
 │     ├─ cache.rs             # Cloudflare purge-on-write, off unless configured  (M5)
 │     ├─ tag.rs               # canonical form + href — shared by render, db, view (M5)
+│     ├─ mood.rs              # the seven moods — shared by db, API, export, pet  (M7)
 │     ├─ url.rs               # percent-encoding for tag paths and ?q=            (M5)
 │     ├─ db/{mod,posts,sessions,search,tags,familiar}.rs  # pools + every statement
 │     ├─ auth/{mod,password,session,middleware,ratelimit}.rs
@@ -142,6 +143,9 @@ CREATE TABLE posts (
   body_text   TEXT    NOT NULL,              -- plaintext, for OG descriptions and search
   visibility  TEXT    NOT NULL DEFAULT 'public'
                 CHECK (visibility IN ('public','unlisted','draft')),
+  mood        TEXT                           -- M7; NULL is "did not say", not neutral
+                CHECK (mood IS NULL OR mood IN ('content','contemplative','tired',
+                       'excited','melancholy','chaos','neutral')),
   created_at  INTEGER NOT NULL,              -- unix millis, UTC
   updated_at  INTEGER NOT NULL,
   edited_at   INTEGER,                       -- null until the body changes post-publish
@@ -484,9 +488,29 @@ and the design's energy section.
 inexplicably a biped. Matching the start of a word keeps plurals and simple inflections
 without a stemmer.
 
-**Mood tags are hashtags.** `#tired` at the end of a post is the explicit signal the design
-asks for, and it needs no new syntax: the tag pass already ran, the tag is in `body_text`,
-and the post is indexed under it like any other. Keyword inference is the fallback.
+**Mood is a field on the post, picked in the composer (M7).** It began as a hashtag —
+`#tired` in the body — which worked and needed no new syntax, but was only discoverable if
+you already knew the seven names. In practice that made it a feature you had to remember
+rather than one you could see. It is now a `mood` column and a picker beside the visibility
+select, and hashtags are back to being ordinary tags.
+
+The column is **nullable, and NULL is not `neutral`**. NULL means "did not say" and the
+familiar infers a mood from the text; a stored value means "did say" and nothing overrides
+it — including a stored `neutral`, which means "nothing to report" and is the only way to
+tell the pet that a post about a broken deploy was not a crisis. That distinction is why
+`PATCH` takes a doubly-optional mood: the key absent leaves it alone, `null` clears it, and
+one layer of `Option` could not express both.
+
+**Mood never renders on youwin.dev.** It feeds the kaomoji and the aggregate on
+`/familiar`, and appears per-post only in the composer. Changing it does not set
+`edited_at` either — nothing on the public site shows it, so correcting one months later is
+not an edit to what was published.
+
+`0003_post_mood.sql` backfills from the hashtags that used to carry it, reading `post_tags`
+rather than pattern-matching bodies: those rows were written by the pass that decided what
+a hashtag *was*, so they are the extraction rules rather than an approximation. The tags
+themselves are left in place — `/t/tired` still works, and rewriting published bodies to
+delete a word is not something a migration should do quietly.
 
 **It feeds on public posts only, replies included.** A reply is something that was sat down
 and written. An unlisted post is not counted — the post count renders on a public page, and
@@ -529,8 +553,8 @@ GET    /api/feed?cursor=&limit=20     ALL visibilities, flagged
 GET    /api/posts/:public_id          post + thread
 GET    /api/drafts
 GET    /api/search?q=&cursor=         ALL visibilities, drafts included    (M5)
-POST   /api/posts         {body, parent_public_id?, visibility}
-PATCH  /api/posts/:id     {body?, visibility?}
+POST   /api/posts         {body, parent_public_id?, visibility, mood?}
+PATCH  /api/posts/:id     {body?, visibility?, mood?}   mood: absent leaves, null clears
 DELETE /api/posts/:id                 sets deleted_at
 
 GET    /preview/:public_id            HTML — the public templates, authenticated
@@ -991,6 +1015,7 @@ simply finishes.
 | **M4** | PWA | ✅ **Done.** Generated icons, manifest, service worker, offline feed, update prompt, install prompt, share sheet. Offline verified against `pnpm run preview` with every server stopped |
 | **M5** | Polish | ✅ **Done.** FTS5 search on both surfaces, hashtags with `/t/:tag` and `/tags`, `export`, `backup` + nightly timer, `rerender`, Cloudflare purge-on-write (off unless configured). 114 tests green |
 | **M6** | The Familiar | ✅ **Done.** The whole state machine — topics, mood, energy decay and bursts, learned circadian phase, growth stages, pose triggers — plus compositional kaomoji rendering, the character sheet, and the five-minute snapshot. On the feed and at `/familiar`. 178 tests green |
+| **M7** | Mood as a field | ✅ **Done.** `posts.mood`, a picker in the composer, and `0003` backfilling the hashtags that used to carry it. Hashtags are ordinary tags again; keyword inference stays as the fallback for a post with nothing picked. 190 tests green |
 
 The split changes the shape of the plan more than anything else: **M1 ships a complete,
 finished artifact** — a public archive at `youwin.dev` that works and is done — rather

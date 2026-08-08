@@ -6,12 +6,15 @@
 //! would still be `Ok(vec![])`.
 
 use sqlx::SqlitePool;
-use youwin_server::db::posts::{self, Cursor, Post, Visibility};
+use youwin_server::{
+    db::posts::{self, Cursor, Post, Visibility},
+    mood::Mood,
+};
 
 const T0: i64 = 1_786_000_000_000;
 
 async fn post_at(pool: &SqlitePool, body: &str, offset_minutes: i64, visibility: Visibility) -> Post {
-    posts::insert(pool, body, None, visibility, T0 + offset_minutes * 60_000)
+    posts::insert(pool, body, None, visibility, None, T0 + offset_minutes * 60_000)
         .await
         .expect("insert")
 }
@@ -22,6 +25,7 @@ async fn reply_at(pool: &SqlitePool, parent: &Post, body: &str, offset_minutes: 
         body,
         Some(parent.id),
         Visibility::Public,
+        None,
         T0 + offset_minutes * 60_000,
     )
     .await
@@ -70,7 +74,7 @@ async fn insert_sets_root_id_to_self_for_roots_and_inherits_it_for_replies(pool:
     assert_eq!(reply.parent_id, Some(root.id));
 
     // A reply to a reply stays on the same thread rather than starting one.
-    let nested = posts::insert(&pool, "nested", Some(reply.id), Visibility::Public, T0 + 600_000)
+    let nested = posts::insert(&pool, "nested", Some(reply.id), Visibility::Public, None, T0 + 600_000)
         .await
         .unwrap();
     assert_eq!(nested.root_id, root.id);
@@ -107,7 +111,7 @@ async fn feed_page_counts_only_visible_replies(pool: SqlitePool) {
     reply_at(&pool, &root, "one", 1).await;
     reply_at(&pool, &root, "two", 2).await;
 
-    let hidden = posts::insert(&pool, "draft reply", Some(root.id), Visibility::Draft, T0 + 3)
+    let hidden = posts::insert(&pool, "draft reply", Some(root.id), Visibility::Draft, None, T0 + 3)
         .await
         .unwrap();
     let removed = reply_at(&pool, &root, "deleted reply", 4).await;
@@ -193,7 +197,7 @@ async fn thread_returns_the_whole_chain_oldest_first(pool: SqlitePool) {
 
     // Neither of these belongs to the thread.
     let other = post_at(&pool, "unrelated", 30, Visibility::Public).await;
-    let hidden = posts::insert(&pool, "draft reply", Some(root.id), Visibility::Draft, T0 + 40)
+    let hidden = posts::insert(&pool, "draft reply", Some(root.id), Visibility::Draft, None, T0 + 40)
         .await
         .unwrap();
 
@@ -228,4 +232,135 @@ async fn deleting_a_root_cascades_to_its_replies(pool: SqlitePool) {
         .await
         .unwrap();
     assert_eq!(remaining, 0);
+}
+
+#[sqlx::test]
+async fn insert_stores_the_mood_and_leaves_it_null_when_none_was_picked(pool: SqlitePool) {
+    let picked = posts::insert(
+        &pool,
+        "shipped it",
+        None,
+        Visibility::Public,
+        Some(Mood::Excited),
+        T0,
+    )
+    .await
+    .expect("insert");
+
+    assert_eq!(picked.mood, Some(Mood::Excited));
+
+    // Read back rather than trusting the returned struct: the column is what the
+    // familiar reads, and these two disagreeing is exactly the bug this catches.
+    let stored = posts::by_public_id(&pool, &picked.public_id)
+        .await
+        .unwrap()
+        .expect("stored");
+    assert_eq!(stored.mood, Some(Mood::Excited));
+
+    let unpicked = post_at(&pool, "no mood on this one", 1, Visibility::Public).await;
+    assert_eq!(unpicked.mood, None, "NULL is 'did not say', not 'neutral'");
+}
+
+#[sqlx::test]
+async fn update_can_leave_set_and_clear_the_mood(pool: SqlitePool) {
+    let post = posts::insert(
+        &pool,
+        "a first draft",
+        None,
+        Visibility::Public,
+        Some(Mood::Tired),
+        T0,
+    )
+    .await
+    .expect("insert");
+
+    // `None` — not mentioned, so untouched. Editing the body must not silently
+    // wipe a mood the composer did not send.
+    let untouched = posts::update(&pool, &post.public_id, Some("edited body"), None, None, T0 + 1)
+        .await
+        .expect("update")
+        .expect("found");
+    assert_eq!(untouched.post.mood, Some(Mood::Tired));
+    assert_eq!(untouched.body, "edited body");
+
+    // `Some(Some(_))` — set.
+    let set = posts::update(
+        &pool,
+        &post.public_id,
+        None,
+        None,
+        Some(Some(Mood::Chaos)),
+        T0 + 2,
+    )
+    .await
+    .expect("update")
+    .expect("found");
+    assert_eq!(set.post.mood, Some(Mood::Chaos));
+
+    // `Some(None)` — cleared back to "did not say", which is the case a single
+    // layer of Option could not express.
+    let cleared = posts::update(&pool, &post.public_id, None, None, Some(None), T0 + 3)
+        .await
+        .expect("update")
+        .expect("found");
+    assert_eq!(cleared.post.mood, None);
+}
+
+#[sqlx::test]
+async fn changing_only_the_mood_does_not_mark_a_post_edited(pool: SqlitePool) {
+    // Mood is not part of what was published — nothing on the public site shows
+    // it — so correcting one months later must not stamp the post as edited.
+    let post = post_at(&pool, "a published post", 0, Visibility::Public).await;
+    assert_eq!(post.edited_at, None);
+
+    let moody = posts::update(
+        &pool,
+        &post.public_id,
+        None,
+        None,
+        Some(Some(Mood::Melancholy)),
+        T0 + 60_000,
+    )
+    .await
+    .expect("update")
+    .expect("found");
+
+    assert_eq!(moody.post.mood, Some(Mood::Melancholy));
+    assert_eq!(moody.post.edited_at, None, "the text is unchanged");
+
+    // The body genuinely changing still does mark it.
+    let rewritten = posts::update(
+        &pool,
+        &post.public_id,
+        Some("different words"),
+        None,
+        None,
+        T0 + 120_000,
+    )
+    .await
+    .expect("update")
+    .expect("found");
+    assert_eq!(rewritten.post.edited_at, Some(T0 + 120_000));
+}
+
+#[sqlx::test]
+async fn the_database_refuses_a_mood_that_is_not_one_of_the_seven(pool: SqlitePool) {
+    // The CHECK constraint in 0003 is the backstop under the Rust enum. Without
+    // it, a hand-written UPDATE in a SQLite shell could store a value that every
+    // read then fails to decode.
+    let post = post_at(&pool, "a post", 0, Visibility::Public).await;
+
+    let refused = sqlx::query("UPDATE posts SET mood = 'smug' WHERE id = ?1")
+        .bind(post.id)
+        .execute(&pool)
+        .await;
+
+    assert!(refused.is_err(), "the CHECK constraint should have rejected it");
+
+    // …and NULL is explicitly allowed, which the constraint has to spell out.
+    sqlx::query("UPDATE posts SET mood = NULL WHERE id = ?1")
+        .bind(post.id)
+        .execute(&pool)
+        .await
+        .expect("NULL is a legal mood");
 }

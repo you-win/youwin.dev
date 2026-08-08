@@ -15,7 +15,7 @@ const T0: i64 = 1_786_000_000_000;
 const PAGE: i64 = 20;
 
 async fn post_at(pool: &SqlitePool, body: &str, minutes: i64, visibility: Visibility) -> Post {
-    posts::insert(pool, body, None, visibility, T0 + minutes * 60_000)
+    posts::insert(pool, body, None, visibility, None, T0 + minutes * 60_000)
         .await
         .expect("insert")
 }
@@ -65,7 +65,7 @@ async fn editing_a_post_reindexes_it(pool: SqlitePool) {
     // and the new text is never findable at all.
     let post = post_at(&pool, "about herons", 0, Visibility::Public).await;
 
-    posts::update(&pool, &post.public_id, Some("about egrets"), None, T0 + 1)
+    posts::update(&pool, &post.public_id, Some("about egrets"), None, None, T0 + 1)
         .await
         .expect("update");
 
@@ -80,7 +80,7 @@ async fn changing_only_visibility_does_not_disturb_the_index(pool: SqlitePool) {
     let post = post_at(&pool, "about herons", 0, Visibility::Draft).await;
     assert_eq!(find(&pool, "herons").await.len(), 0, "drafts are not public");
 
-    posts::update(&pool, &post.public_id, None, Some(Visibility::Public), T0 + 1)
+    posts::update(&pool, &post.public_id, None, Some(Visibility::Public), None, T0 + 1)
         .await
         .expect("publish");
 
@@ -152,7 +152,7 @@ async fn search_paginates_with_the_same_cursor_as_the_feed(pool: SqlitePool) {
 #[sqlx::test]
 async fn reply_counts_come_back_on_hits(pool: SqlitePool) {
     let root = post_at(&pool, "starlings roost here", 0, Visibility::Public).await;
-    posts::insert(&pool, "one more thing", Some(root.id), Visibility::Public, T0 + 60_000)
+    posts::insert(&pool, "one more thing", Some(root.id), Visibility::Public, None, T0 + 60_000)
         .await
         .expect("reply");
 
@@ -188,7 +188,7 @@ async fn posting_records_its_hashtags(pool: SqlitePool) {
 async fn editing_a_post_replaces_its_tags(pool: SqlitePool) {
     let post = post_at(&pool, "about #herons", 0, Visibility::Public).await;
 
-    posts::update(&pool, &post.public_id, Some("about #egrets"), None, T0 + 1)
+    posts::update(&pool, &post.public_id, Some("about #egrets"), None, None, T0 + 1)
         .await
         .expect("update");
 
@@ -207,6 +207,7 @@ async fn tag_pages_hide_drafts_and_deletions_and_include_replies(pool: SqlitePoo
         "more on #bats",
         Some(root.id),
         Visibility::Public,
+        None,
         T0 + 60_000,
     )
     .await
@@ -283,7 +284,7 @@ async fn rerender_rebuilds_derived_columns_without_marking_anything_edited(pool:
 #[sqlx::test]
 async fn export_carries_every_post_with_its_tags_and_thread_links(pool: SqlitePool) {
     let root = post_at(&pool, "a thread about #bats", 0, Visibility::Public).await;
-    posts::insert(&pool, "more", Some(root.id), Visibility::Public, T0 + 60_000)
+    posts::insert(&pool, "more", Some(root.id), Visibility::Public, None, T0 + 60_000)
         .await
         .expect("reply");
     let gone = post_at(&pool, "removed", 2, Visibility::Public).await;

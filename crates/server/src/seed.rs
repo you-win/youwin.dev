@@ -9,9 +9,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
 
-use crate::db::{
-    Db,
-    posts::{self, Visibility},
+use crate::{
+    db::{
+        Db,
+        posts::{self, Visibility},
+    },
+    mood::Mood,
 };
 
 const DAY_MILLIS: i64 = 24 * 60 * 60 * 1000;
@@ -37,12 +40,16 @@ pub async fn run(db: &Db) -> Result<()> {
     // with formatting, a thread, an unlisted post, a draft, and enough hashtags
     // that /tags and /t/:tag have something to show. If the feed looks right
     // after seeding, the feed is right.
+    //
+    // Moods are set on some and left off others on purpose, so the familiar has
+    // both a picked mood and an inferred one to work from.
     let root = posts::insert(
         &db.write,
         "Rebuilt this site as a microblog. #Rust on the back, no JavaScript on the front.\n\
          The whole public surface is server-rendered and sits in cache.",
         None,
         Visibility::Public,
+        Some(Mood::Excited),
         now - 3 * DAY_MILLIS,
     )
     .await?;
@@ -54,6 +61,7 @@ pub async fn run(db: &Db) -> Result<()> {
          — every newline you typed is a newline you meant.",
         Some(root.id),
         Visibility::Public,
+        None,
         now - 3 * DAY_MILLIS + 20 * 60 * 1000,
     )
     .await?;
@@ -65,6 +73,7 @@ pub async fn run(db: &Db) -> Result<()> {
          retried. #rust makes that a type-level guarantee rather than a convention.",
         Some(root.id),
         Visibility::Public,
+        Some(Mood::Contemplative),
         now - 3 * DAY_MILLIS + 55 * 60 * 1000,
     )
     .await?;
@@ -75,6 +84,7 @@ pub async fn run(db: &Db) -> Result<()> {
          — the chapter on factoring is worth the whole book.",
         None,
         Visibility::Public,
+        Some(Mood::Content),
         now - 2 * DAY_MILLIS,
     )
     .await?;
@@ -88,6 +98,8 @@ pub async fn run(db: &Db) -> Result<()> {
          not a tag at all.",
         None,
         Visibility::Public,
+        // Left unset, so the familiar infers one from the text.
+        None,
         now - DAY_MILLIS,
     )
     .await?;
@@ -97,6 +109,7 @@ pub async fn run(db: &Db) -> Result<()> {
         "Unlisted: reachable if you have the link, never in the feed, never indexed.",
         None,
         Visibility::Unlisted,
+        None,
         now - 6 * 60 * 60 * 1000,
     )
     .await?;
@@ -106,6 +119,7 @@ pub async fn run(db: &Db) -> Result<()> {
         "A draft. Should 404 on the public site, indistinguishably from a bad id.",
         None,
         Visibility::Draft,
+        Some(Mood::Neutral),
         now - 60 * 60 * 1000,
     )
     .await?;

@@ -106,6 +106,9 @@ mod tests {
                 body_html: body_html.to_owned(),
                 body_text: body_text.to_owned(),
                 visibility: Visibility::Public,
+                // The Atom document has no notion of mood, which is the point of
+                // asserting it here: nothing in this file may start rendering it.
+                mood: None,
                 created_at: 1_786_259_199_000,
                 edited_at: None,
             },

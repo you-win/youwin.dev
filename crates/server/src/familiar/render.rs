@@ -66,7 +66,7 @@ pub fn describe(state: &PetState) -> String {
         "The familiar: a {} {}, {} and {}, in its {} hours.",
         state.stage.label(),
         state.form.label(),
-        state.mood.label(),
+        state.mood.as_str(),
         state.level.label(),
         state.phase.label(),
     )

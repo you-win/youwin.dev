@@ -9,7 +9,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::Rng as _;
 use sqlx::SqlitePool;
 
-use crate::{db::tags, render::markdown};
+use crate::{db::tags, mood::Mood, render::markdown};
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, serde::Serialize, serde::Deserialize,
@@ -39,6 +39,9 @@ pub struct Post {
     pub body_html: String,
     pub body_text: String,
     pub visibility: Visibility,
+    /// What the composer's mood picker was set to, or `None` for "did not say".
+    /// Never rendered on the public site; it exists for the familiar.
+    pub mood: Option<Mood>,
     pub created_at: i64,
     pub edited_at: Option<i64>,
 }
@@ -160,7 +163,7 @@ pub fn new_public_id() -> String {
 // row per feed page it is cheaper, and it keeps the row shape flat for FromRow.
 const FEED_PAGE: &str = "
     SELECT p.id, p.public_id, p.parent_id, p.root_id,
-           p.body_html, p.body_text, p.visibility, p.created_at, p.edited_at,
+           p.body_html, p.body_text, p.visibility, p.mood, p.created_at, p.edited_at,
            (SELECT count(*) FROM posts r
              WHERE r.root_id = p.id AND r.id <> p.id
                AND r.deleted_at IS NULL AND r.visibility = 'public') AS reply_count
@@ -174,13 +177,13 @@ const FEED_PAGE: &str = "
 
 const BY_PUBLIC_ID: &str = "
     SELECT id, public_id, parent_id, root_id,
-           body_html, body_text, visibility, created_at, edited_at
+           body_html, body_text, visibility, mood, created_at, edited_at
       FROM posts
      WHERE public_id = ?1 AND deleted_at IS NULL AND visibility <> 'draft'";
 
 const THREAD: &str = "
     SELECT id, public_id, parent_id, root_id,
-           body_html, body_text, visibility, created_at, edited_at
+           body_html, body_text, visibility, mood, created_at, edited_at
       FROM posts
      WHERE root_id = ?1 AND deleted_at IS NULL AND visibility <> 'draft'
      ORDER BY created_at ASC, id ASC";
@@ -196,7 +199,7 @@ const THREAD: &str = "
 // lines. Literal queries are also greppable, which the assembled ones were not.
 const AUTHORED_FEED: &str = "
     SELECT p.id, p.public_id, p.parent_id, p.root_id,
-           p.body, p.body_html, p.body_text, p.visibility, p.created_at, p.edited_at,
+           p.body, p.body_html, p.body_text, p.visibility, p.mood, p.created_at, p.edited_at,
            (SELECT count(*) FROM posts r
              WHERE r.root_id = p.id AND r.id <> p.id AND r.deleted_at IS NULL) AS reply_count
       FROM posts p
@@ -208,7 +211,7 @@ const AUTHORED_FEED: &str = "
 
 const AUTHORED_BY_PUBLIC_ID: &str = "
     SELECT p.id, p.public_id, p.parent_id, p.root_id,
-           p.body, p.body_html, p.body_text, p.visibility, p.created_at, p.edited_at,
+           p.body, p.body_html, p.body_text, p.visibility, p.mood, p.created_at, p.edited_at,
            (SELECT count(*) FROM posts r
              WHERE r.root_id = p.id AND r.id <> p.id AND r.deleted_at IS NULL) AS reply_count
       FROM posts p
@@ -216,7 +219,7 @@ const AUTHORED_BY_PUBLIC_ID: &str = "
 
 const AUTHORED_THREAD: &str = "
     SELECT p.id, p.public_id, p.parent_id, p.root_id,
-           p.body, p.body_html, p.body_text, p.visibility, p.created_at, p.edited_at,
+           p.body, p.body_html, p.body_text, p.visibility, p.mood, p.created_at, p.edited_at,
            (SELECT count(*) FROM posts r
              WHERE r.root_id = p.id AND r.id <> p.id AND r.deleted_at IS NULL) AS reply_count
       FROM posts p
@@ -225,7 +228,7 @@ const AUTHORED_THREAD: &str = "
 
 const AUTHORED_DRAFTS: &str = "
     SELECT p.id, p.public_id, p.parent_id, p.root_id,
-           p.body, p.body_html, p.body_text, p.visibility, p.created_at, p.edited_at,
+           p.body, p.body_html, p.body_text, p.visibility, p.mood, p.created_at, p.edited_at,
            (SELECT count(*) FROM posts r
              WHERE r.root_id = p.id AND r.id <> p.id AND r.deleted_at IS NULL) AS reply_count
       FROM posts p
@@ -291,50 +294,70 @@ pub async fn drafts(pool: &SqlitePool) -> Result<Vec<AuthoredRow>, sqlx::Error> 
 ///
 /// `edited_at` is set only when a *published* post's body actually changes:
 /// re-saving a draft is not an edit in the sense the marker means, and neither
-/// is flipping visibility without touching the text.
+/// is flipping visibility or mood without touching the text. Mood in particular
+/// is not part of what was published — nothing on the public site shows it — so
+/// correcting one months later must not stamp the post as edited.
+///
+/// `mood` is doubly optional because it has three cases and the outer two are
+/// not the same: `None` leaves it alone, `Some(None)` clears it back to "did not
+/// say", and `Some(Some(m))` sets it. Collapsing that to one layer would make
+/// "unset the mood" unexpressible.
+/// What [`update`] reads before deciding what it is changing.
+#[derive(sqlx::FromRow)]
+struct Current {
+    id: i64,
+    body: String,
+    visibility: Visibility,
+    mood: Option<Mood>,
+    edited_at: Option<i64>,
+}
+
 pub async fn update(
     pool: &SqlitePool,
     public_id: &str,
     body: Option<&str>,
     visibility: Option<Visibility>,
+    mood: Option<Option<Mood>>,
     now: i64,
 ) -> Result<Option<AuthoredRow>, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    let current: Option<(i64, String, Visibility, Option<i64>)> = sqlx::query_as(
-        "SELECT id, body, visibility, edited_at FROM posts
+    let current: Option<Current> = sqlx::query_as(
+        "SELECT id, body, visibility, mood, edited_at FROM posts
           WHERE public_id = ?1 AND deleted_at IS NULL",
     )
     .bind(public_id)
     .fetch_optional(&mut *tx)
     .await?;
 
-    let Some((id, current_body, current_visibility, current_edited)) = current else {
+    let Some(current) = current else {
         return Ok(None);
     };
 
-    let new_body = body.unwrap_or(&current_body);
-    let body_changed = new_body != current_body;
+    let new_body = body.unwrap_or(&current.body);
+    let body_changed = new_body != current.body;
     let rendered = markdown::render(new_body);
-    let new_visibility = visibility.unwrap_or(current_visibility);
+    let new_visibility = visibility.unwrap_or(current.visibility);
+    let new_mood = mood.unwrap_or(current.mood);
 
-    let edited_at = if body_changed && current_visibility.is_published() {
+    let edited_at = if body_changed && current.visibility.is_published() {
         Some(now)
     } else {
-        current_edited
+        current.edited_at
     };
 
     sqlx::query(
         "UPDATE posts
             SET body = ?2, body_html = ?3, body_text = ?4,
-                visibility = ?5, updated_at = ?6, edited_at = ?7
+                visibility = ?5, mood = ?6, updated_at = ?7, edited_at = ?8
           WHERE id = ?1",
     )
-    .bind(id)
+    .bind(current.id)
     .bind(new_body)
     .bind(&rendered.html)
     .bind(&rendered.text)
     .bind(new_visibility)
+    .bind(new_mood)
     .bind(now)
     .bind(edited_at)
     .execute(&mut *tx)
@@ -343,7 +366,7 @@ pub async fn update(
     // Unconditional, not gated on `body_changed`: the tag pass is part of
     // rendering, so re-running it is how a change to the extraction rules takes
     // effect on the next edit. It is also cheap — a handful of rows.
-    tags::sync(&mut tx, id, &rendered.tags).await?;
+    tags::sync(&mut tx, current.id, &rendered.tags).await?;
 
     tx.commit().await?;
 
@@ -409,6 +432,7 @@ pub struct ExportRow {
     pub body_html: String,
     pub body_text: String,
     pub visibility: Visibility,
+    pub mood: Option<Mood>,
     pub created_at: i64,
     pub updated_at: i64,
     pub edited_at: Option<i64>,
@@ -422,7 +446,7 @@ const EXPORT_ALL: &str = "
     SELECT p.id, p.public_id,
            parent.public_id AS parent_public_id,
            root.public_id   AS root_public_id,
-           p.body, p.body_html, p.body_text, p.visibility,
+           p.body, p.body_html, p.body_text, p.visibility, p.mood,
            p.created_at, p.updated_at, p.edited_at, p.deleted_at
       FROM posts p
       LEFT JOIN posts parent ON parent.id = p.parent_id
@@ -554,6 +578,7 @@ pub async fn insert(
     body: &str,
     parent_id: Option<i64>,
     visibility: Visibility,
+    mood: Option<Mood>,
     created_at: i64,
 ) -> Result<Post, sqlx::Error> {
     let rendered = markdown::render(body);
@@ -574,8 +599,8 @@ pub async fn insert(
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO posts
             (public_id, parent_id, root_id, body, body_html, body_text,
-             visibility, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+             visibility, mood, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
          RETURNING id",
     )
     .bind(&public_id)
@@ -585,6 +610,7 @@ pub async fn insert(
     .bind(&rendered.html)
     .bind(&rendered.text)
     .bind(visibility)
+    .bind(mood)
     .bind(created_at)
     .fetch_one(&mut *tx)
     .await?;
@@ -610,6 +636,7 @@ pub async fn insert(
         body_html: rendered.html,
         body_text: rendered.text,
         visibility,
+        mood,
         created_at,
         edited_at: None,
     })

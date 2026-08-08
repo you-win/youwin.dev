@@ -1,8 +1,12 @@
 //! The face: what the writer most recently sounded like.
+//!
+//! Two sources, in order. A mood picked in the composer is stored on the post
+//! and wins outright. A post with none gets one inferred from its text, so an
+//! archive written without ever touching the picker still has a pet with a face.
 
 use crate::familiar::{Morsel, Mood, mentions};
 
-/// Vocabularies for inferring a mood from a post that carries no tag.
+/// Vocabularies for inferring a mood from a post that has none stored.
 ///
 /// The prototype's lists, minus the words too common to mean anything —
 /// `chaos` claimed "what" and "why", which between them fire on a large
@@ -16,25 +20,28 @@ fn keywords(mood: Mood) -> &'static [&'static str] {
         Mood::Excited => &["wow", "amazing", "incredible", "breakthrough", "shipped", "launch", "🎉", "🔥"],
         Mood::Melancholy => &["sad", "miss", "gone", "fade", "memories", "😔", "🌧"],
         Mood::Chaos => &["wtf", "broken", "crazy", "panic", "cursed", "error", "crash"],
-        // The fallback. Nothing spells it, it is what is left when nothing else
-        // matches — including when a post is explicitly tagged `#neutral`.
+        // The fallback. Nothing spells it — it is what is left when nothing else
+        // matches.
         Mood::Neutral => &[],
     }
 }
 
 /// One post's mood.
 ///
-/// An explicit hashtag wins outright: `#tired` at the end of a post is the
-/// writer saying so, and no amount of cheerful vocabulary should talk the pet
-/// out of it. Only then does keyword inference run, and the strongest match
-/// wins — ties break toward the earlier mood in [`Mood::ALL`], which is stable
-/// but arbitrary and not worth more machinery than that.
+/// A stored mood is the writer saying so, and no amount of cheerful vocabulary
+/// should talk the pet out of it. That includes a stored `Neutral`, which means
+/// "nothing to report" and deliberately suppresses inference — otherwise there
+/// would be no way to tell the pet that a post about a crash was not a crisis.
 pub fn detect(post: &Morsel) -> Mood {
-    let text = post.body_text.to_lowercase();
+    post.mood.unwrap_or_else(|| infer(&post.body_text))
+}
 
-    if let Some(tagged) = Mood::ALL.into_iter().find(|mood| has_tag(&text, mood.label())) {
-        return tagged;
-    }
+/// The mood a post's text suggests, for a post that has none stored.
+///
+/// The strongest match wins; ties break toward the earlier mood in [`Mood::ALL`],
+/// which is stable but arbitrary and not worth more machinery than that.
+pub fn infer(body_text: &str) -> Mood {
+    let text = body_text.to_lowercase();
 
     let mut best = Mood::Neutral;
     let mut best_score = 0;
@@ -96,49 +103,50 @@ pub fn distribution(posts: &[Morsel]) -> Vec<(Mood, f64)> {
     ranked
 }
 
-/// Whether `text` carries `#name` as a whole tag.
-///
-/// `text` must already be lowercased. The tail check is what stops `#tiredness`
-/// from reading as `#tired`; the rules match `render::markdown`'s, which is what
-/// decided the post's real tags on the way in.
-fn has_tag(text: &str, name: &str) -> bool {
-    text.match_indices('#').any(|(at, _)| {
-        text[at + 1..].strip_prefix(name).is_some_and(|tail| {
-            tail.chars()
-                .next()
-                .is_none_or(|next| !next.is_alphanumeric() && next != '_' && next != '-')
-        })
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::familiar::fixture::{HOUR, START, post};
+    use crate::familiar::fixture::{HOUR, START, post, post_feeling};
 
     #[test]
-    fn an_explicit_tag_beats_the_words_around_it() {
-        // Every content keyword in the language, and one tag that overrules them.
-        let tagged = post(START, "a nice good happy wonderful great day #tired");
-        assert_eq!(detect(&tagged), Mood::Tired);
+    fn a_stored_mood_beats_the_words_around_it() {
+        // Every content keyword in the language, and one picked mood that
+        // overrules them.
+        let picked = post_feeling(START, "a nice good happy wonderful great day", Mood::Tired);
+        assert_eq!(detect(&picked), Mood::Tired);
 
-        let untagged = post(START, "a nice good happy wonderful great day");
-        assert_eq!(detect(&untagged), Mood::Content);
+        let unpicked = post(START, "a nice good happy wonderful great day");
+        assert_eq!(detect(&unpicked), Mood::Content);
     }
 
     #[test]
-    fn a_tag_must_be_the_whole_word() {
-        assert!(has_tag("done #tired", "tired"));
-        assert!(has_tag("#tired, finally", "tired"));
-        assert!(!has_tag("#tiredness is real", "tired"));
-        assert!(!has_tag("#tired-eyes", "tired"));
-        assert!(!has_tag("just tired", "tired"), "no hash, no tag");
+    fn a_stored_neutral_turns_inference_off() {
+        // The distinction the nullable column exists for: "I did not say" infers,
+        // "I said nothing to report" does not. Without it there is no way to tell
+        // the pet that a post about a broken deploy was not a crisis.
+        let text = "the deploy is broken, everything is on fire";
+
+        assert_eq!(detect(&post(START, text)), Mood::Chaos);
+        assert_eq!(detect(&post_feeling(START, text, Mood::Neutral)), Mood::Neutral);
+    }
+
+    #[test]
+    fn a_hashtag_no_longer_overrides_what_a_post_says() {
+        // `#tired` used to win outright over any amount of contrary vocabulary.
+        // It is an ordinary tag now, so the text decides.
+        let tagged = post(START, "an amazing incredible breakthrough #tired");
+        assert_eq!(detect(&tagged), Mood::Excited);
+
+        // It does still count as the *word* it spells, like any other word in
+        // the post — which is why an old `#tired` post usually still infers
+        // tired, backfill or not.
+        assert_eq!(detect(&post(START, "done for today #tired")), Mood::Tired);
     }
 
     #[test]
     fn the_most_recent_feeling_is_the_one_worn() {
         let posts = [
-            post(START, "shipped it #excited"),
+            post_feeling(START, "shipped it", Mood::Excited),
             post(START + HOUR, "exhausted, going to bed"),
             post(START + 2 * HOUR, "the build is at 3 of 40"),
         ];
@@ -156,8 +164,8 @@ mod tests {
     #[test]
     fn the_distribution_counts_every_post_including_the_quiet_ones() {
         let posts = [
-            post(START, "#excited"),
-            post(START + HOUR, "#excited"),
+            post_feeling(START, "one", Mood::Excited),
+            post_feeling(START + HOUR, "two", Mood::Excited),
             post(START + 2 * HOUR, "the build is at 3 of 40"),
             post(START + 3 * HOUR, "another ordinary note"),
         ];

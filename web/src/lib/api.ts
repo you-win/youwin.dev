@@ -10,11 +10,40 @@
 
 export type Visibility = "public" | "unlisted" | "draft";
 
+/**
+ * How a post was written, picked in the composer.
+ *
+ * Never shown on youwin.dev — it feeds the familiar, which is the kaomoji on the
+ * public feed. `null` means the picker was left alone, and the familiar infers a
+ * mood from the text instead; an explicit "neutral" means "nothing to report"
+ * and turns that inference off.
+ */
+export type Mood =
+  | "content"
+  | "contemplative"
+  | "tired"
+  | "excited"
+  | "melancholy"
+  | "chaos"
+  | "neutral";
+
+/** In the order the picker offers them, matching the server's `Mood::ALL`. */
+export const MOODS: readonly Mood[] = [
+  "content",
+  "contemplative",
+  "tired",
+  "excited",
+  "melancholy",
+  "chaos",
+  "neutral",
+];
+
 export interface Post {
   id: string;
   body: string;
   body_html: string;
   visibility: Visibility;
+  mood: Mood | null;
   is_reply: boolean;
   reply_count: number;
   created_at: number;
@@ -152,16 +181,28 @@ export const api = {
   show: (id: string) =>
     request<Thread>("GET", `/api/posts/${encodeURIComponent(id)}`),
 
-  create: (body: string, visibility: Visibility, parentId?: string) =>
+  create: (
+    body: string,
+    visibility: Visibility,
+    mood: Mood | null,
+    parentId?: string,
+  ) =>
     request<Post>("POST", "/api/posts", {
       body,
       visibility,
+      mood,
       parent_id: parentId,
     }),
 
+  /**
+   * Omitting a key leaves that field alone. `mood: null` is therefore not the
+   * same as omitting it — that one clears the mood back to "did not say", which
+   * JSON.stringify preserves because an explicit null is serialized and an
+   * `undefined` is dropped.
+   */
   update: (
     id: string,
-    changes: { body?: string; visibility?: Visibility },
+    changes: { body?: string; visibility?: Visibility; mood?: Mood | null },
   ) =>
     request<Post>("PATCH", `/api/posts/${encodeURIComponent(id)}`, changes),
 

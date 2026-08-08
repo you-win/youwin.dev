@@ -71,7 +71,7 @@ pub async fn sync(
 // lists. Each row links to its own permalink, which renders the whole thread.
 const TAG_FEED: &str = "
     SELECT p.id, p.public_id, p.parent_id, p.root_id,
-           p.body_html, p.body_text, p.visibility, p.created_at, p.edited_at,
+           p.body_html, p.body_text, p.visibility, p.mood, p.created_at, p.edited_at,
            (SELECT count(*) FROM posts r
              WHERE r.root_id = p.id AND r.id <> p.id
                AND r.deleted_at IS NULL AND r.visibility = 'public') AS reply_count

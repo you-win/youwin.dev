@@ -2,7 +2,7 @@ import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 
 import Composer from "../components/Composer";
 import PostCard from "../components/PostCard";
-import { api, type Post, type Visibility } from "../lib/api";
+import { api, type Mood, type Post, type Visibility } from "../lib/api";
 
 /** A post that exists locally but has not come back from the server yet. */
 interface Pending {
@@ -51,7 +51,11 @@ export default function Feed() {
     onCleanup(() => observer.disconnect());
   });
 
-  const submit = async (body: string, visibility: Visibility) => {
+  const submit = async (
+    body: string,
+    visibility: Visibility,
+    mood: Mood | null,
+  ) => {
     // Show it immediately. The server owns rendering, so the optimistic card
     // displays the raw text until the real one arrives — honest about what it
     // is, and the layout does not jump.
@@ -61,6 +65,7 @@ export default function Feed() {
       body,
       body_html: "",
       visibility,
+      mood,
       is_reply: false,
       reply_count: 0,
       created_at: Date.now(),
@@ -69,7 +74,7 @@ export default function Feed() {
     setPending((current) => [{ key, post: optimistic }, ...current]);
 
     try {
-      const created = await api.create(body, visibility);
+      const created = await api.create(body, visibility, mood);
       setPosts((existing) => [created, ...existing]);
     } finally {
       // Rolled back on failure as well as success — the Composer keeps the text

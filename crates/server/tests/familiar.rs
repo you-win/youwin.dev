@@ -22,6 +22,7 @@ use youwin_server::{
         posts::{Cursor, Post, Visibility},
     },
     familiar::{Familiar, Stage, cache::TTL_MILLIS},
+    mood::Mood,
     public::{self, assets::Assets},
 };
 
@@ -30,7 +31,7 @@ const T0: i64 = 1_785_888_000_000;
 const HOUR: i64 = 3_600_000;
 
 async fn post_at(pool: &SqlitePool, body: &str, hours: i64, visibility: Visibility) -> Post {
-    db::posts::insert(pool, body, None, visibility, T0 + hours * HOUR)
+    db::posts::insert(pool, body, None, visibility, None, T0 + hours * HOUR)
         .await
         .expect("insert")
 }
@@ -86,7 +87,7 @@ async fn replies_feed_the_familiar_but_nothing_unpublished_does(pool: SqlitePool
     let root = post_at(&pool, "a public root", 0, Visibility::Public).await;
 
     // A reply is something that was sat down and written, so it counts.
-    db::posts::insert(&pool, "a public reply", Some(root.id), Visibility::Public, T0 + HOUR)
+    db::posts::insert(&pool, "a public reply", Some(root.id), Visibility::Public, None, T0 + HOUR)
         .await
         .expect("reply");
 
@@ -104,6 +105,29 @@ async fn replies_feed_the_familiar_but_nothing_unpublished_does(pool: SqlitePool
     let fed = db::familiar::all(&pool).await.expect("query");
     let bodies: Vec<_> = fed.iter().map(|post| post.body_text.as_str()).collect();
     assert_eq!(bodies, ["a public root", "a public reply"]);
+}
+
+#[sqlx::test]
+async fn a_picked_mood_reaches_the_pets_face_and_overrides_the_text(pool: SqlitePool) {
+    // Text that reads unmistakably as one thing, filed under another. The whole
+    // point of the picker is that the writer gets the last word.
+    db::posts::insert(
+        &pool,
+        "an amazing incredible breakthrough, shipped at last",
+        None,
+        Visibility::Public,
+        Some(Mood::Melancholy),
+        T0,
+    )
+    .await
+    .expect("insert");
+
+    let reading = Familiar::new().read(&pool, T0).await.expect("read");
+    assert_eq!(reading.state.mood, Mood::Melancholy);
+
+    // The same post with nothing picked reads as what it says.
+    let inferred = db::familiar::all(&pool).await.expect("query");
+    assert_eq!(inferred[0].mood, Some(Mood::Melancholy), "the column round-trips");
 }
 
 #[sqlx::test]
