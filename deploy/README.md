@@ -135,7 +135,7 @@ zone, change the nameservers at the registrar, wait for **Active**.
 
 Then `A`/`AAAA` records for the apex, `www`, and `write` — all pointing at this
 server. Leave them **DNS-only (grey cloud)** for now. The proxy goes on in step
-7, once TLS is confirmed working, so that a certificate problem and a proxy
+9a, once TLS is confirmed working, so that a certificate problem and a proxy
 problem cannot arrive at the same time.
 
 **5. [server] Caddy**
@@ -182,8 +182,9 @@ sudo caddy upgrade && sudo systemctl restart caddy
 
 **5b. The API token.** Create one at Cloudflare → My Profile → API Tokens, with
 the **Edit zone DNS** template scoped to `youwin.dev` (and `timothyyuen.io` too,
-if you are doing step 12). This is a *third* token, separate from the cache-purge
-one in step 10 — different jobs, different blast radius.
+if you are also moving that site onto Cloudflare — see the section after the
+setup steps). This is a *third* token, separate from the cache-purge one in
+step 11 — different jobs, different blast radius.
 
 The Caddyfile reads it as `{env.CF_API_TOKEN}`, and Caddy's unit does not load an
 environment file by default:
@@ -337,7 +338,7 @@ Then **re-run the failed workflow** from the Actions tab. This time activation
 finds a service it can restart, both health checks pass, and it goes green —
 which is also the proof that the whole pipeline works end to end.
 
-**9. [dashboard] Turn on the proxy, then the cache rule — do not skip this**
+**9a. [dashboard] Turn on the proxy**
 
 Set **SSL/TLS → Overview → Full (strict)** first. Cloudflare's default on a new
 zone can be Flexible, which terminates TLS at the edge and speaks *plain HTTP* to
@@ -352,24 +353,73 @@ site still answers, and that it is now coming through Cloudflare:
 curl -fsSI https://youwin.dev | grep -iE 'server|cf-ray'
 ```
 
-Finally the cache rule. The public site sends
-`Cache-Control: public, max-age=60, s-maxage=300`, but **Cloudflare does not
-cache HTML by default**, so that header is inert until a rule exists. Without it
-every request reaches the origin and the main benefit of a cookieless, JS-free
-site is left on the table.
+**9b. [dashboard] The cache rule — do not skip this**
 
-Caching → Cache Rules → for `youwin.dev`, "Eligible for cache" with "Respect
-origin TTL". Do **not** apply it to `write.youwin.dev`, which is entirely
-authenticated — and note the rule must not match `/api/*` or `/preview/*` even on
-the apex, though neither exists there.
+The public site sends `Cache-Control: public, max-age=60, s-maxage=300`, but
+**Cloudflare does not cache HTML by default**, so that header is inert until a
+rule exists. Every request reaches the origin, and the main benefit of a
+cookieless, JS-free site is left on the table. The symptom is
+`cf-cache-status: DYNAMIC` — Cloudflare's way of saying "not eligible", as
+opposed to `BYPASS`, which means eligible but deliberately skipped.
 
-Verify it is actually caching, which is the whole point and the easiest thing to
-believe without checking:
+> **`write.youwin.dev` is in this same zone.** It is a subdomain of `youwin.dev`,
+> so a rule built on the default *All incoming requests* would apply to the
+> authoring app as well, and start caching authenticated API responses at the
+> edge. The filter below is not a nicety — it is the whole safety of this step.
+
+**Caching → Cache Rules → Create rule.**
+
+1. **Name:** `Cache public HTML`.
+2. **When incoming requests match:** choose **Custom filter expression**, *not*
+   "All incoming requests", and paste this into the expression editor:
+
+   ```
+   (http.host in {"youwin.dev" "www.youwin.dev"})
+   ```
+
+   That is the same boundary the application draws: two hostnames, one of which
+   is a cookieless read-only surface and the other of which is not.
+3. **Then → Cache eligibility:** **Eligible for cache**.
+4. **Edge TTL:** the option that defers to the origin — currently labelled
+   *"Use cache-control header if present, use default otherwise"*. That is what
+   picks up `s-maxage=300`; Cloudflare prefers `s-maxage` over `max-age` for its
+   own cache when both are present.
+5. **Browser TTL:** likewise *"Respect origin TTL"*, which leaves visitors on the
+   `max-age=60` the origin already sends.
+6. **Deploy.**
+
+Labels in this UI move around between redesigns; the intent to hold on to is
+*eligible for cache, and take both TTLs from the origin's header*. Nothing here
+should override a TTL — the origin's numbers are chosen deliberately, and
+step 11 exists precisely so they can stay long.
+
+Now verify, because this is the easiest step in the document to believe without
+checking:
 
 ```bash
-curl -fsSI https://youwin.dev | grep -i cf-cache-status   # MISS, then HIT
+# The public site: MISS on the first request, HIT on the second.
 curl -fsSI https://youwin.dev | grep -i cf-cache-status
+curl -fsSI https://youwin.dev | grep -i cf-cache-status
+
+# The authoring host must NOT be caching. Expect DYNAMIC, never HIT.
+curl -fsSI https://write.youwin.dev/api/health | grep -i cf-cache-status
 ```
+
+If the second call still says `DYNAMIC`, the rule is not matching — check the
+expression before anything else. If it says `BYPASS`, the rule matched but
+something in the response opted out; on this site that would be surprising, since
+it sets no cookies.
+
+To re-test after a change, **Caching → Configuration → Purge Everything**.
+
+Two things worth knowing rather than discovering:
+
+- `/assets/*` was *already* cached before this rule, by Cloudflare's default
+  handling of static extensions. The rule is for the HTML, the Atom feed, and the
+  404s.
+- Cache rules are per-zone, so `timothyyuen.io` is untouched by this and needs no
+  rule of its own — see the section below for why its headers already do the
+  right thing.
 
 > Once the proxy is on, the origin sees Cloudflare's addresses rather than
 > visitors'. The app reads `CF-Connecting-IP` for its login throttle, which is
@@ -466,7 +516,7 @@ curl -fsSI https://timothyyuen.io | head -1
 ```
 
 **4. [dashboard] Turn on the proxy.** SSL/TLS → **Full (strict)** first, for the
-same reason as step 7 — Flexible plus the site's HSTS header is a redirect loop.
+same reason as step 9a — Flexible plus the site's HSTS header is a redirect loop.
 Then flip the apex and `www` to orange.
 
 No cache rule is needed. The `(static_site)` snippet already sends
