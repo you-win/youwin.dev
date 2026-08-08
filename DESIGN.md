@@ -113,8 +113,7 @@ youwin.dev/
    ├─ youwin.dev.caddy        # both blocks; installs to /etc/caddy/conf.d/
    ├─ youwin.service
    ├─ youwin-backup.{service,timer}
-   ├─ activate-youwin         # the one command CI may run as root
-   └─ deploy.sh               # manual fallback; same release layout
+   └─ activate-youwin         # the one command CI may run as root
 ```
 
 ## Data model
@@ -866,22 +865,24 @@ Cloudflare cache rule (dashboard), the purge token (server-side, CI never sees i
 `rerender`, because *when* to rebuild derived columns is a judgement about data rather than
 a build step.
 
-**The manual path** — `deploy/deploy.sh`, for the first release and for shipping without
-pushing — assembles byte-for-byte the same layout and calls the same `activate-youwin`. It
-runs from WSL2 Debian, where three things about a Windows checkout at `/mnt/c` bite. The
-frontend build cannot run there at all: `web/node_modules` holds native binaries for exactly
-one platform, and `pnpm` still appears on `PATH` because interop appends the Windows one, so
-it looks like it should work right up until a module resolution error. `deploy.sh` tests
-that the pnpm it found does not live under `/mnt/`, and otherwise uses the Windows build,
-refusing to ship it if any source is newer — including `crates/server/src/public/**/*.rs`,
-which Tailwind scans, so a `.rs` change can alter `public.css`. Every file under `/mnt/c`
-also reports mode **0777**, so the release is staged in a temp directory with explicit
-`chmod`s rather than rsyncing modes across, and `ssh` refuses a key stored there. And
-`CARGO_TARGET_DIR` is redirected out of the tree, because a Windows build and a WSL build
-cannot share `./target` without invalidating each other. CI has none of these problems: it
-installs Linux `node_modules` from scratch. A `.gitattributes` pins `eol=lf` for shell
-scripts, systemd units and the Caddyfile, so a clone on a machine with `core.autocrlf=true`
-cannot produce a `deploy.sh` that dies with `bad interpreter: /bin/bash^M`.
+**There is no local deploy path, and that is the point.** A `deploy.sh` existed briefly and
+was deleted: it had to guess at whether the pnpm on `PATH` was the Linux one or the Windows
+one leaking in through WSL interop, whether `web/dist` was stale, and whether `/mnt/c`'s
+0777 modes were about to be rsynced onto the server. All of that was scaffolding around a
+problem CI does not have — it installs Linux `node_modules` from scratch on a clean runner —
+and it broke the first time it was used in a checkout it had not been written for. One route
+that runs on every push beats two where the rarely-used one quietly rots.
+
+That also decides the bootstrap. Rather than a script to place the first release, the
+runbook is **ordered** so CI can: install the unit but do not enable it, hand CI its key,
+push, and let the first run go red at activation. `current` is populated by then, so
+`hash-password` can run against the binary CI just delivered, and re-running the workflow
+turns it green. The one intentionally-failing run is cheaper than a second deployment
+mechanism.
+
+A `.gitattributes` pins `eol=lf` for shell scripts, systemd units and the Caddyfile, so a
+clone on a machine with `core.autocrlf=true` cannot produce an `activate-youwin` that dies
+with `bad interpreter: /bin/bash^M`.
 
 **Backups.** WAL means `cp` of the `.db` file is not a valid backup — the `.db` alone can be
 missing every commit still sitting in the `-wal`. `youwin-backup.timer` runs two things

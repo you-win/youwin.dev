@@ -120,7 +120,7 @@ jobs:
           cp -r deploy release/deploy
           find release -type d -exec chmod 755 {} +
           find release -type f -exec chmod 644 {} +
-          chmod 755 release/bin/youwin-server release/deploy/*.sh release/deploy/activate-youwin
+          chmod 755 release/bin/youwin-server release/deploy/activate-youwin
 
       # ---------------------------------------------------------------- ship
       - name: Configure SSH

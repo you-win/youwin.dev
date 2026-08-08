@@ -1,17 +1,21 @@
 # Deploying youwin.dev
 
-Routine deploys run entirely from GitHub Actions: push to `master`, and CI
-builds, tests, ships, activates, health-checks, and rolls back if the site does
-not come up. Nothing needs to happen on your machine.
+Deploys run entirely from GitHub Actions: push to `master`, and CI builds, tests,
+ships, activates, health-checks, and rolls back if the site does not come up.
+Nothing is built on your machine and nothing is built on the server.
 
-Getting to that point does not. This document is mostly the one-time setup.
+That includes the *first* deploy — there is no bootstrap script, and the steps
+below are ordered so CI can do it. What is left over is provisioning that needs
+root and one password that must never touch CI, which is most of this document.
 
 ## What CI can and cannot do
 
-**Entirely CI, after setup:** frontend build, `cargo test`, release build,
-upload, symlink flip, restart, health check, automatic rollback, pruning old
-releases. There is no build step on the server and no Rust toolchain on it —
-the binary arrives prebuilt.
+**Entirely CI:** frontend build, `cargo test`, release build, upload, symlink
+flip, restart, health check, automatic rollback, pruning old releases — the first
+deploy included. There is no build step on the server and no Rust toolchain on
+it; the binary arrives prebuilt. Nor is there a local deploy path to keep in
+sync, which is deliberate: one route that runs on every push beats two where the
+rarely-used one quietly rots.
 
 **Never CI, by design:**
 
@@ -115,7 +119,12 @@ sudo install -m 644 deploy/youwin-backup.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 ```
 
-Do **not** enable `youwin` yet — there is no binary and no password hash. Step 6.
+Install them, but do **not** enable `youwin` yet — there is no binary and no
+password hash. Step 8 brings it up.
+
+The unit does need to exist before step 7, though: `activate-youwin` restarts it,
+and "unit not found" is a less informative failure than "cannot start without
+`YOUWIN_PASSWORD_HASH`".
 
 **4. [dashboard] DNS, on Cloudflare**
 
@@ -256,25 +265,61 @@ curl -fsSI https://write.youwin.dev | head -1
 DNS-01 is the one that keeps working whatever the proxy is doing, which is why
 it is the default here.
 
-**6. [local, then server] First release and the password**
+**6. [local + GitHub] Hand CI the keys**
 
-CI cannot do this one, because the password hash has to exist before the service
-can start and the binary has to exist before you can generate a hash with it.
-From WSL2 Debian, which has cargo and can build the Linux binary directly:
+Generate a deploy key *for CI only* — not your admin key. It goes on the
+`deploy` user, which has no password and cannot log in interactively.
 
 ```bash
-DEPLOY_HOST=server.example ./deploy/deploy.sh
+ssh-keygen -t ed25519 -N '' -C 'github-actions youwin.dev' -f ~/.ssh/youwin-ci
+ssh-keyscan -t ed25519 server.example       # for DEPLOY_KNOWN_HOSTS
 ```
 
-It will upload a release and then fail at activation, because `youwin.service`
-cannot start without `YOUWIN_PASSWORD_HASH`. That is expected. Now, on the
-server:
+Install the public half on the server:
+
+```bash
+sudo tee -a /home/deploy/.ssh/authorized_keys < ~/.ssh/youwin-ci.pub
+```
+
+In the repo's **Settings → Secrets and variables → Actions**:
+
+| Secret | Value |
+|---|---|
+| `DEPLOY_SSH_KEY` | the whole of `~/.ssh/youwin-ci` (private half) |
+| `DEPLOY_KNOWN_HOSTS` | the `ssh-keyscan` output |
+| `DEPLOY_HOST` | `server.example` |
+
+**7. [GitHub] First deploy — it is supposed to go red**
+
+Push to `master`, or run the workflow by hand from the Actions tab.
+
+It will build, test, upload the release, point `current` at it — and then fail,
+because `youwin.service` cannot start without a password hash that does not
+exist yet. That is the expected outcome and the reason this ordering exists: the
+binary has to be on the box before you can generate a hash with it, and the hash
+has to exist before the service can start.
+
+What matters is that the release landed. Check:
+
+```bash
+readlink -f /srv/sites/youwin.dev/current
+/srv/sites/youwin.dev/current/bin/youwin-server version
+```
+
+**8. [server] The password, then bring it up**
 
 ```bash
 sudo -u youwin /srv/sites/youwin.dev/current/bin/youwin-server hash-password \
   | sudo tee /etc/youwin/secrets.env
 sudo chmod 0600 /etc/youwin/secrets.env
+
+# Step 7 left the unit in a failed state, and `Restart=on-failure` will have
+# retried until systemd's start-rate limit tripped. Without this, `start` is
+# refused with "Start request repeated too quickly".
+sudo systemctl reset-failed youwin
+
 sudo systemctl enable --now youwin
+systemctl status youwin
 ```
 
 `hash-password` reads the terminal without echoing and never takes the password
@@ -288,7 +333,11 @@ never succeed.
 > stripped on the way in for exactly this reason; the point is that the failure
 > it used to cause was invisible.
 
-**7. [dashboard] Turn on the proxy, then the cache rule — do not skip this**
+Then **re-run the failed workflow** from the Actions tab. This time activation
+finds a service it can restart, both health checks pass, and it goes green —
+which is also the proof that the whole pipeline works end to end.
+
+**9. [dashboard] Turn on the proxy, then the cache rule — do not skip this**
 
 Set **SSL/TLS → Overview → Full (strict)** first. Cloudflare's default on a new
 zone can be Flexible, which terminates TLS at the edge and speaks *plain HTTP* to
@@ -330,7 +379,7 @@ curl -fsSI https://youwin.dev | grep -i cf-cache-status
 > restrict 80/443 to [Cloudflare's ranges](https://www.cloudflare.com/ips/) with
 > `ufw` — worth doing eventually, not a blocker.
 
-**8. [server] Backups**
+**10. [server] Backups**
 
 ```bash
 sudo systemctl enable --now youwin-backup.timer
@@ -338,33 +387,7 @@ sudo systemctl start youwin-backup.service   # take one now rather than waiting
 sudo systemctl status youwin-backup.service  # oneshot: confirm it exited 0
 ```
 
-**9. [local + GitHub] Hand over to CI**
-
-Generate a deploy key *for CI only* — it is not your admin key, and it goes on
-the `deploy` user, which cannot log in interactively.
-
-```bash
-ssh-keygen -t ed25519 -N '' -C 'github-actions youwin.dev' -f ~/.ssh/youwin-ci
-ssh-keyscan -t ed25519 server.example    # for DEPLOY_KNOWN_HOSTS
-```
-
-On the server:
-
-```bash
-sudo tee -a /home/deploy/.ssh/authorized_keys < ~/.ssh/youwin-ci.pub
-```
-
-In the repo's **Settings → Secrets and variables → Actions**:
-
-| Secret | Value |
-|---|---|
-| `DEPLOY_SSH_KEY` | the whole of `~/.ssh/youwin-ci` (private half) |
-| `DEPLOY_KNOWN_HOSTS` | the `ssh-keyscan` output |
-| `DEPLOY_HOST` | `server.example` |
-
-Then push, or run the workflow by hand from the Actions tab.
-
-**10. [optional] Cache purging on write**
+**11. [optional] Cache purging on write**
 
 Skip this and the site runs on the `s-maxage` TTL alone, which is correct: an
 edit takes up to five minutes to appear. To close that gap, create a **second**
@@ -531,48 +554,23 @@ sudo -u youwin /srv/sites/youwin.dev/current/bin/youwin-server rerender
 
 Idempotent, safe at any time, and it does not mark anything as edited.
 
-### Manual deploy
+### Shipping without pushing
 
-For the first release, or when you need to ship without pushing. Requires a
-Linux host with `cargo` — WSL2 Debian qualifies.
+There is no local deploy script, on purpose. One path that is exercised on every
+push beats two paths where the rarely-used one quietly rots — which is exactly
+what happened to the script that used to live here.
 
-```powershell
-cd web ; pnpm run build          # PowerShell: see "The Windows/WSL split"
-```
+If you need to ship something that is not on `master`, run the workflow by hand
+against a branch: **Actions → deploy → Run workflow → pick the branch.** It takes
+the same path as any other deploy, including the tests.
 
-```bash
-DEPLOY_HOST=server.example ./deploy/deploy.sh
-```
-
-It assembles byte-for-byte the same release layout as CI and calls the same
-`activate-youwin`.
-
-## The Windows/WSL split
-
-The working copy is on Windows; anything Linux-shaped runs in WSL2 Debian, which
-sees the same tree at `/mnt/c/Users/theaz/dev/youwin.dev`. Only the manual path
-cares, but when it does, these bite:
-
-**The frontend build cannot run in WSL.** `web/node_modules` holds native
-binaries for exactly one platform — `@rollup/rollup-win32-x64-msvc`,
-`@tailwindcss/oxide-win32-x64-msvc`, `lightningcss-win32-x64-msvc` — and Windows
-and Linux cannot share one directory of them. `pnpm` *does* appear on `PATH` in
-WSL, because interop appends the Windows `PATH`, which makes this look like it
-should work right up until a module resolution error. `deploy.sh` detects that
-the pnpm it found lives under `/mnt/` and uses `web/dist` as built on Windows,
-refusing to ship it if any source is newer — including
-`crates/server/src/public/**/*.rs`, which Tailwind scans.
-
-CI has none of this problem: it installs Linux `node_modules` from scratch.
-
-**Every file under `/mnt/c` reports mode 0777.** `deploy.sh` builds its release
-in a temp directory with explicit `chmod`s rather than rsyncing modes across.
-The same fact means `ssh` refuses a private key stored under `/mnt/c` — WSL
-keeps its own `~/.ssh`.
-
-**`CARGO_TARGET_DIR` is redirected out of the tree.** A Windows `cargo build`
-and a WSL one cannot share `./target`; each invalidates the other's artifacts,
-turning every platform switch into a full rebuild.
+If GitHub itself is down, the shape of a manual deploy is the "Assemble the
+release" and "Upload and activate" steps of
+[`deploy.yml`](../.github/workflows/deploy.yml) run by hand: build the frontends
+and the binary on a Linux host, arrange `bin/`, `public/`, `write/` and `deploy/`
+in a directory, `rsync` it to `deploy@host:/srv/sites/youwin.dev/releases/<name>/`,
+then `ssh deploy@host sudo /usr/local/bin/activate-youwin <name>`. Reading it out
+of the workflow means it cannot describe a layout the real deploy stopped using.
 
 ## Checking on it — [server]
 
