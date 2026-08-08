@@ -1,0 +1,135 @@
+name: deploy
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# Never let two deploys race for the `current` symlink. Queue instead of
+# cancelling, so an in-flight rsync is not killed halfway.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # Pinned, not ubuntu-latest, because the glibc this builds against becomes
+    # the floor for the server. 24.04 is glibc 2.39; Debian 13 has 2.41, so the
+    # binary loads there. A server OLDER than the runner would not be able to
+    # run it — `activate-youwin` smoke-tests for exactly that before it stops
+    # anything, so the failure is a red workflow rather than a dead site.
+    # If the server is ever older than the runner, build in a matching container
+    # instead: `container: rust:1-trixie`.
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # ---------------------------------------------------------------- front
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      # Installed by exact version rather than through a third-party setup
+      # action: this workflow holds the deploy key, so every action in it is one
+      # more thing with access to it. The version tracks web/package.json's
+      # packageManager field, which is what pnpm itself checks against.
+      - run: npm install -g pnpm@9.15.9
+
+      - run: pnpm --dir web install --frozen-lockfile
+
+      - run: pnpm --dir web run typecheck
+
+      - run: pnpm --dir web run build
+
+      # The server reads this manifest at boot to resolve the hashed stylesheet
+      # URL and refuses to start without it. Better to fail here than to ship a
+      # release that cannot come up.
+      - name: Sanity-check the frontend build
+        run: |
+          for f in \
+            web/dist/public/.vite/manifest.json \
+            web/dist/write/index.html \
+            web/dist/write/sw.js \
+            web/dist/write/manifest.webmanifest
+          do
+            test -s "$f" || { echo "missing $f"; exit 1; }
+          done
+
+      # ---------------------------------------------------------------- back
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      # --locked: the deploy builds exactly what Cargo.lock says, or it fails.
+      # Silently resolving a different dependency set during a deploy is the
+      # kind of thing you find out about much later.
+      - run: cargo test --locked --workspace
+
+      - name: Build release
+        env:
+          # Baked in, so `youwin-server version` and the startup log both say
+          # which release is running.
+          YOUWIN_BUILD: ${{ github.sha }}
+        run: cargo build --release --locked --package youwin-server
+
+      - name: Report the binary's runtime requirements
+        run: |
+          objdump -T target/release/youwin-server \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -1 \
+            | sed 's/^/needs at most: /'
+          ldd target/release/youwin-server
+
+      # ---------------------------------------------------------------- stage
+      - name: Assemble the release
+        run: |
+          mkdir -p release/bin
+          cp target/release/youwin-server release/bin/
+          cp -r web/dist/public release/public
+          cp -r web/dist/write  release/write
+          # Favicons and robots.txt sit alongside the hashed assets; Caddy
+          # serves them from the same root.
+          cp -r static/. release/public/
+          # Unit files, the Caddyfile and activate-youwin travel with the
+          # release, so the server always has the current copies on disk when
+          # one of them needs reinstalling.
+          cp -r deploy release/deploy
+          find release -type d -exec chmod 755 {} +
+          find release -type f -exec chmod 644 {} +
+          chmod 755 release/bin/youwin-server release/deploy/*.sh release/deploy/activate-youwin
+
+      # ---------------------------------------------------------------- ship
+      - name: Configure SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+
+      - name: Upload and activate
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          REL="$(date -u +%Y%m%d-%H%M%S)-${GITHUB_SHA::7}"
+          echo "Deploying release $REL"
+
+          # Trailing slash on the source: copy the contents, not the directory.
+          # -rlptD rather than -a: no --owner/--group, which the unprivileged
+          # deploy user cannot set anyway.
+          rsync -rlptDz --delete \
+            release/ "deploy@$HOST:/srv/youwin/releases/$REL/"
+
+          # The one privileged operation, through a sudoers rule scoped to this
+          # single command. It smoke-tests the binary, flips the symlink,
+          # restarts, health-checks both listeners, and rolls itself back if the
+          # site does not come up.
+          ssh "deploy@$HOST" "sudo /usr/local/bin/activate-youwin $REL"
+
+          echo "release=\`$REL\`" >> "$GITHUB_STEP_SUMMARY"

@@ -2,6 +2,7 @@
   "name": "youwin-web",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@9.15.9",
   "scripts": {
     "dev": "vite",
     "build": "pnpm run build:public && pnpm run build:app",

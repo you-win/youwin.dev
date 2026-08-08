@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+#
+# /usr/local/bin/activate-youwin  —  root:root 0755
+#
+# Points /srv/youwin/current at a release, restarts, and proves the site came
+# back. Rolls back on its own if it did not.
+#
+# CI uploads a release directory as the unprivileged `deploy` user and then runs
+# exactly this, through a sudoers rule scoped to this one command. That is the
+# whole privilege boundary: CI can ship a release and ask for it to be
+# activated, and can do nothing else as root.
+#
+#   deploy ALL=(root) NOPASSWD: /usr/local/bin/activate-youwin
+#
+# Usage:  activate-youwin <release>
+#         activate-youwin --rollback
+
+set -euo pipefail
+
+ROOT=/srv/youwin
+RELEASES="$ROOT/releases"
+CURRENT="$ROOT/current"
+PREVIOUS="$ROOT/previous"
+KEEP="${KEEP_RELEASES:-5}"
+
+log() { printf '==> %s\n' "$*"; }
+die() { printf 'activate-youwin: %s\n' "$*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Resolve the target
+# ---------------------------------------------------------------------------
+
+[ $# -eq 1 ] || die "usage: activate-youwin <release> | --rollback"
+
+if [ "$1" = "--rollback" ]; then
+  [ -L "$PREVIOUS" ] || die "no previous release recorded"
+  release="$(basename "$(readlink -f "$PREVIOUS")")"
+  log "rolling back to $release"
+else
+  release="$1"
+fi
+
+# The argument arrives over SSH from CI. Anything that could escape the releases
+# directory is refused outright rather than sanitised — there is exactly one
+# shape of valid release name and it is easy to state.
+case "$release" in
+  *[!A-Za-z0-9._-]* | "" | .* | -*)
+    die "refusing unsafe release name: $release" ;;
+esac
+
+target="$RELEASES/$release"
+[ -d "$target" ] || die "no such release: $target"
+
+binary="$target/bin/youwin-server"
+[ -x "$binary" ] || die "release has no executable at bin/youwin-server"
+[ -f "$target/public/.vite/manifest.json" ] \
+  || die "release is missing the public asset manifest; the server would refuse to start"
+
+# ---------------------------------------------------------------------------
+# Smoke-test BEFORE stopping anything
+#
+# `version` touches no configuration and no database, so the only thing it can
+# fail on is the dynamic loader — which is precisely the failure worth catching
+# here. A binary built against a newer glibc than this machine has would
+# otherwise take the site down and keep it down, because the old one is already
+# stopped by the time systemd discovers the new one cannot start.
+# ---------------------------------------------------------------------------
+
+log "smoke-testing $release"
+version="$("$binary" version)" || die "the new binary does not run on this machine
+Most likely a glibc mismatch with the CI runner. Compare:
+    ldd --version | head -1
+    objdump -T $binary | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1"
+log "$version"
+
+# ---------------------------------------------------------------------------
+# Flip and restart
+# ---------------------------------------------------------------------------
+
+# Record where we are, so --rollback has somewhere to go. Skipped when
+# activating the release that is already live, which would otherwise make
+# `previous` point at itself.
+if [ -L "$CURRENT" ] && [ "$(readlink -f "$CURRENT")" != "$target" ]; then
+  ln -sfn "$(readlink -f "$CURRENT")" "$PREVIOUS.new"
+  mv -Tf "$PREVIOUS.new" "$PREVIOUS"
+fi
+
+# ln -sfn into a temp name then mv -T: mv over a symlink is atomic, whereas
+# `ln -sfn` onto an existing link is briefly not. There is no moment where
+# `current` does not resolve.
+ln -sfn "$target" "$CURRENT.new"
+mv -Tf "$CURRENT.new" "$CURRENT"
+
+log "restarting youwin"
+systemctl restart youwin
+
+# ---------------------------------------------------------------------------
+# Prove it came back
+# ---------------------------------------------------------------------------
+
+healthy() {
+  local i
+  for i in $(seq 1 20); do
+    if curl -fsS --max-time 2 http://127.0.0.1:8080/health >/dev/null 2>&1 \
+    && curl -fsS --max-time 2 http://127.0.0.1:8081/api/health >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+if healthy; then
+  log "healthy on both listeners"
+else
+  # Both health checks touch the database, so failing here means more than "the
+  # socket is not up yet" — 10s of retries have already allowed for a slow start.
+  printf 'activate-youwin: %s\n' "the new release did not come up; rolling back" >&2
+  systemctl status youwin --no-pager --lines 20 >&2 || true
+
+  if [ -L "$PREVIOUS" ]; then
+    ln -sfn "$(readlink -f "$PREVIOUS")" "$CURRENT.new"
+    mv -Tf "$CURRENT.new" "$CURRENT"
+    systemctl restart youwin
+    healthy && printf 'activate-youwin: rolled back to %s\n' "$(basename "$(readlink -f "$CURRENT")")" >&2
+  fi
+
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Prune
+#
+# Never removes what `current` or `previous` point at, whatever KEEP says —
+# pruning the release you are running is a way to make `--rollback` useless at
+# exactly the moment it is needed.
+# ---------------------------------------------------------------------------
+
+live="$(readlink -f "$CURRENT")"
+prior="$([ -L "$PREVIOUS" ] && readlink -f "$PREVIOUS" || echo '')"
+
+# shellcheck disable=SC2012 # names here are constrained by the check above
+ls -1 "$RELEASES" | sort | head -n "-$KEEP" | while read -r old; do
+  path="$RELEASES/$old"
+  [ "$path" = "$live" ] && continue
+  [ "$path" = "$prior" ] && continue
+  log "pruning $old"
+  rm -rf -- "$path"
+done
+
+log "activated $release"

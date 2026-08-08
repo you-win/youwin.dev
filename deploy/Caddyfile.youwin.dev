@@ -18,7 +18,7 @@ youwin.dev, www.youwin.dev {
         # /assets, but this block matches first and therefore always wins; that
         # fallback exists for `cargo run` in dev.
         handle /assets/* {
-                root * /var/www/youwin/public
+                root * /srv/youwin/current/public
                 header Cache-Control "public, max-age=31536000, immutable"
                 file_server {
                         precompressed br gzip
@@ -26,7 +26,7 @@ youwin.dev, www.youwin.dev {
         }
 
         handle /favicon.ico /favicon-32x32.png /robots.txt {
-                root * /var/www/youwin/public
+                root * /srv/youwin/current/public
                 header Cache-Control "public, max-age=86400"
                 file_server
         }
@@ -85,7 +85,7 @@ write.youwin.dev {
         # Ordered before the SPA assets, and safe: Vite's hashed names cannot
         # collide across the two builds.
         handle /assets/public-* {
-                root * /var/www/youwin/public
+                root * /srv/youwin/current/public
                 header Cache-Control "public, max-age=31536000, immutable"
                 file_server {
                         precompressed br gzip
@@ -94,7 +94,7 @@ write.youwin.dev {
 
         # Content-hashed SPA build output.
         handle /assets/* {
-                root * /var/www/youwin/write
+                root * /srv/youwin/current/write
                 header Cache-Control "public, max-age=31536000, immutable"
                 file_server {
                         precompressed br gzip
@@ -104,14 +104,14 @@ write.youwin.dev {
         # PWA plumbing: on disk, but MUST revalidate. A cached sw.js pins an old
         # build on every installed device until it expires.
         handle /sw.js /manifest.webmanifest /icons/* {
-                root * /var/www/youwin/write
+                root * /srv/youwin/current/write
                 header Cache-Control "no-cache"
                 file_server
         }
 
         # Client-routed SPA: serve the file if it exists, else the shell.
         handle {
-                root * /var/www/youwin/write
+                root * /srv/youwin/current/write
                 try_files {path} /index.html
                 file_server
                 header Cache-Control "no-cache"

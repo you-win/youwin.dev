@@ -3,6 +3,12 @@
 # One unit for both listeners: 8080 (public) and 8081 (authoring). The process
 # binds loopback only — Caddy is the sole possible peer, which is what makes
 # trusting CF-Connecting-IP / X-Forwarded-For for rate limiting sound.
+#
+# Everything below points through /srv/youwin/current, a symlink that
+# `activate-youwin` flips between release directories. systemd resolves
+# ExecStart at start time, so a restart is what picks up a new release — which
+# is exactly the atomicity wanted: the binary and the assets it serves change
+# together or not at all.
 
 [Unit]
 Description=youwin.dev microblog
@@ -14,10 +20,10 @@ Type=exec
 User=youwin
 Group=youwin
 WorkingDirectory=/srv/youwin
-ExecStart=/srv/youwin/bin/youwin-server
+ExecStart=/srv/youwin/current/bin/youwin-server
 
 Environment=YOUWIN_DB=/var/lib/youwin/youwin.db
-Environment=YOUWIN_PUBLIC_DIST=/var/www/youwin/public
+Environment=YOUWIN_PUBLIC_DIST=/srv/youwin/current/public
 Environment=YOUWIN_PUBLIC_BIND=127.0.0.1:8080
 Environment=YOUWIN_WRITE_BIND=127.0.0.1:8081
 Environment=YOUWIN_PUBLIC_ORIGIN=https://youwin.dev

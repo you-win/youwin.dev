@@ -27,8 +27,8 @@ Environment=YOUWIN_DB=/var/lib/youwin/youwin.db
 Environment=RUST_LOG=youwin_server=info
 
 # Keeps the last 30 dated snapshots itself; nothing external prunes them.
-ExecStart=/srv/youwin/bin/youwin-server backup /var/backups/youwin
-ExecStart=/srv/youwin/bin/youwin-server export /var/backups/youwin/export
+ExecStart=/srv/youwin/current/bin/youwin-server backup /var/backups/youwin
+ExecStart=/srv/youwin/current/bin/youwin-server export /var/backups/youwin/export
 
 # Same hardening as the server, plus the backup directory. The database path
 # stays writable because opening SQLite touches the -wal and -shm sidecars even

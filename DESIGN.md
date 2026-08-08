@@ -107,11 +107,14 @@ youwin.dev/
 │     ├─ lib/{api,session,pwa}.ts
 │     ├─ routes/{Feed,Permalink,Login,Drafts,Search,Settings}.tsx
 │     └─ components/{Composer,PostCard}.tsx
+├─ .github/workflows/
+│  └─ deploy.yml              # build, test, ship, activate — the normal path
 └─ deploy/
    ├─ Caddyfile.youwin.dev    # both blocks
    ├─ youwin.service
    ├─ youwin-backup.{service,timer}
-   └─ deploy.sh
+   ├─ activate-youwin         # the one command CI may run as root
+   └─ deploy.sh               # manual fallback; same release layout
 ```
 
 ## Data model
@@ -783,32 +786,72 @@ Graceful shutdown on SIGTERM — both listeners, so WAL checkpoints cleanly on r
 **DNS.** One new record for `write.youwin.dev`. DNS-01 issuance works identically; Caddy
 handles the per-host certificate automatically.
 
-**Build.** The target is Linux; `sqlx`'s `sqlite` feature bundles SQLite through
-`libsqlite3-sys`, so cross-compiling means a cross C toolchain. Skip it. `deploy.sh` rsyncs
-the tree, runs `cargo build --release` on the server, installs the binary atomically, and
-restarts the unit. Nothing beyond a Rust toolchain and a C compiler is needed there — no
-database at build time, no `cargo sqlx`.
+**Deploys run from GitHub Actions**, on push to `master`. CI builds the frontends, runs the
+test suite, builds the binary, ships a release directory, and asks the server to activate
+it. The server has no build toolchain at all — no Rust, no C compiler, no source tree.
 
-**The deploy runs from WSL2 Debian against the Windows checkout at `/mnt/c`,** which splits
-the build across two machines for one specific reason: `web/node_modules` holds native
-binaries for exactly one platform (`@rollup/rollup-win32-x64-msvc`, `@tailwindcss/oxide`,
-`lightningcss`), and Windows and Linux cannot share one directory of them. So the frontends
-are built in PowerShell and everything else happens in WSL. `deploy.sh` detects whether a
-*native* pnpm exists — `command -v pnpm` succeeding is not enough, because interop puts the
-Windows one on `PATH` — and when it does not, it uses the existing `web/dist` and refuses to
-ship it if any source is newer. That staleness check includes
-`crates/server/src/public/**/*.rs`, since Tailwind scans the maud templates and a `.rs`
-change can alter `public.css`; leaving it out would let a stylesheet ship one deploy behind
-its markup, which looks like a styling bug rather than a build one.
+**Releases are directories and `current` is a symlink**, matching the pattern already in use
+for `timothyyuen.io`:
 
-Two more consequences of `/mnt/c`, both of which fail in a way that does not resemble the
-cause. Every file there reports mode **0777**, so `rsync -a` — which implies `-p` — would
-publish a world-writable source tree; `deploy.sh` uses `-rlptz --chmod=D755,F644` instead,
-keeping `-p` precisely so modes are corrected on files left by earlier runs. And `ssh`
-refuses a private key that permissive, so a key under `/mnt/c/…/.ssh` cannot be used in
-place — WSL keeps its own `~/.ssh`. A `.gitattributes` pins `eol=lf` for shell scripts,
-systemd units and the Caddyfile, so a clone on a machine with `core.autocrlf=true` cannot
-produce a `deploy.sh` that dies with `bad interpreter: /bin/bash^M`.
+```
+/srv/youwin/releases/<utc-timestamp>-<sha>/{bin,public,write,deploy}
+/srv/youwin/current  -> releases/…      what systemd and the Caddy roots point at
+/srv/youwin/previous -> releases/…      what --rollback goes back to
+```
+
+The binary and the assets it serves therefore change together or not at all. systemd
+resolves `ExecStart` at start time, so the restart is the cutover. The database is at
+`/var/lib/youwin` and no deploy goes near it.
+
+**The privilege boundary is one sudoers line.** CI authenticates as an unprivileged `deploy`
+user that can write only to `releases/`, and may run exactly one command as root:
+
+```
+deploy ALL=(root) NOPASSWD: /usr/local/bin/activate-youwin
+```
+
+`activate-youwin` validates the release name against a single permitted shape, refuses a
+release with no asset manifest, **smoke-tests the new binary before stopping anything**,
+flips the symlink with `mv -T` (atomic, unlike `ln -sfn` onto an existing link), restarts,
+health-checks both listeners, and rolls back on its own if the site does not come up.
+
+The smoke test is `youwin-server version`, which deliberately touches no configuration and
+no database — so the only thing it can fail on is the dynamic loader. That is the failure
+worth catching here, because it is the one that would otherwise take the site down *after*
+the old process had already been stopped.
+
+**glibc is the one real coupling.** `sqlx`'s `sqlite` feature bundles SQLite through
+`libsqlite3-sys`, and `reqwest` uses rustls, so the binary links nothing but `libc`, `libm`
+and `libgcc_s` — measured, it needs at most `GLIBC_2.38`. The runner is pinned to
+`ubuntu-24.04` (glibc 2.39) rather than `ubuntu-latest`, because whatever CI builds against
+becomes the floor for the server; Debian 13 is 2.41, so it loads. A server *older* than the
+runner could not run it, which is precisely what the smoke test turns into a red workflow
+instead of an outage. The escape hatch is one line — build in a matching container
+(`container: rust:1-trixie`) — rather than a static musl build, which `aws-lc-sys` in the
+rustls tree makes considerably less pleasant than it sounds.
+
+**What is deliberately not automated:** first-time provisioning (root, one-time), the
+password hash (the site's only credential — it must not exist in a CI secret), DNS and the
+Cloudflare cache rule (dashboard), the purge token (server-side, CI never sees it), and
+`rerender`, because *when* to rebuild derived columns is a judgement about data rather than
+a build step.
+
+**The manual path** — `deploy/deploy.sh`, for the first release and for shipping without
+pushing — assembles byte-for-byte the same layout and calls the same `activate-youwin`. It
+runs from WSL2 Debian, where three things about a Windows checkout at `/mnt/c` bite. The
+frontend build cannot run there at all: `web/node_modules` holds native binaries for exactly
+one platform, and `pnpm` still appears on `PATH` because interop appends the Windows one, so
+it looks like it should work right up until a module resolution error. `deploy.sh` tests
+that the pnpm it found does not live under `/mnt/`, and otherwise uses the Windows build,
+refusing to ship it if any source is newer — including `crates/server/src/public/**/*.rs`,
+which Tailwind scans, so a `.rs` change can alter `public.css`. Every file under `/mnt/c`
+also reports mode **0777**, so the release is staged in a temp directory with explicit
+`chmod`s rather than rsyncing modes across, and `ssh` refuses a key stored there. And
+`CARGO_TARGET_DIR` is redirected out of the tree, because a Windows build and a WSL build
+cannot share `./target` without invalidating each other. CI has none of these problems: it
+installs Linux `node_modules` from scratch. A `.gitattributes` pins `eol=lf` for shell
+scripts, systemd units and the Caddyfile, so a clone on a machine with `core.autocrlf=true`
+cannot produce a `deploy.sh` that dies with `bad interpreter: /bin/bash^M`.
 
 **Backups.** WAL means `cp` of the `.db` file is not a valid backup — the `.db` alone can be
 missing every commit still sitting in the `-wal`. `youwin-backup.timer` runs two things
@@ -848,10 +891,12 @@ finished artifact** — a public archive at `youwin.dev` that works and is done 
 than half of a surface that needs auth before it means anything. Writing happens over SSH
 and `INSERT` until M3, which is a perfectly good way to run a blog for a few weeks.
 
-**Still outstanding, and not a code task:** none of this is on the server yet. The Caddy
-blocks, the systemd units, the backup timer and — the one that is easy to skip and silently
-inert — the **Cloudflare cache rule**, without which M1's `s-maxage` header does nothing at
-all. See [`deploy/README.md`](deploy/README.md). After the first M5 deploy, run
+**Still outstanding, and not a code task:** none of this is on the server yet. Routine
+deploys are automated end to end, but the one-time setup is not and cannot be — users and
+directories, `activate-youwin` and its sudoers rule, the systemd units, the Caddy blocks,
+the password hash, the CI deploy key, and the one that is easy to skip and silently inert,
+the **Cloudflare cache rule**, without which M1's `s-maxage` header does nothing at all.
+See [`deploy/README.md`](deploy/README.md). After the first M5 deploy, run
 `youwin-server rerender` once so existing posts pick up hashtag links.
 
 ## Deliberately not in v1

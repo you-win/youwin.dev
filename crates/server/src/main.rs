@@ -10,8 +10,31 @@ use youwin_server::{
     auth::password, backup, clock::now_millis, config, db, export, public, seed, write,
 };
 
+/// Identifies the build, for the smoke test the server runs before activating a
+/// release. CI sets this to the release name; a local build says `dev`.
+const BUILD: &str = match option_env!("YOUWIN_BUILD") {
+    Some(build) => build,
+    None => "dev",
+};
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Answered before anything else is touched — no logging, no environment, no
+    // database. `activate-youwin` runs this against a freshly uploaded binary to
+    // prove it loads on this machine, so it has to work on a box where nothing
+    // is configured yet, and it has to be the cheapest thing the program can do.
+    //
+    // The failure it exists to catch is a glibc mismatch between the CI runner
+    // and the server, which otherwise surfaces as a service that will not start
+    // *after* the old one has already been stopped.
+    if matches!(
+        std::env::args().nth(1).as_deref(),
+        Some("version" | "--version" | "-V")
+    ) {
+        println!("youwin-server {} ({BUILD})", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -66,7 +89,7 @@ async fn main() -> Result<()> {
         }
         Some(other) => bail!(
             "unknown subcommand {other:?}; expected `seed`, `export [dir]`, `backup [dir]`, \
-             `rerender`, `hash-password`, or no argument to serve"
+             `rerender`, `hash-password`, `version`, or no argument to serve"
         ),
     }
 }
@@ -204,6 +227,7 @@ async fn serve(cfg: config::Config) -> Result<()> {
         .with_context(|| format!("binding authoring listener on {}", cfg.write_bind))?;
 
     tracing::info!(
+        build = BUILD,
         public = %cfg.public_bind,
         authoring = %cfg.write_bind,
         database = %cfg.database_path.display(),
