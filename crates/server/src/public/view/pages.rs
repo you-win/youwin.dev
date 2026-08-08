@@ -88,9 +88,11 @@ pub fn permalink(
     );
     page.og_type = "article";
     page.published = Some(super::time_fmt::rfc3339(focused.created_at));
-    // An unlisted post is reachable by link but must never be indexed — that is
-    // the entire difference between `unlisted` and `public`.
-    page.noindex = focused.visibility == Visibility::Unlisted;
+    // Anything not public stays out of the index. Unlisted is reachable by link
+    // but must never be indexed — that is the entire difference from `public`.
+    // Drafts only reach this template through the authenticated `/preview`
+    // route, and must carry it too.
+    page.noindex = focused.visibility != Visibility::Public;
 
     let content = html! {
         div class="flex flex-col gap-3" {

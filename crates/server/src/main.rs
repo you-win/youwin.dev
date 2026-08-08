@@ -167,7 +167,7 @@ async fn serve(cfg: config::Config) -> Result<()> {
     // middleware bug cannot expose the composer. See DESIGN.md "Shape".
     let public_router = public::router(
         db.read.clone(),
-        assets,
+        assets.clone(),
         cfg.public_origin.clone(),
         &cfg.public_dist,
     );
@@ -179,6 +179,8 @@ async fn serve(cfg: config::Config) -> Result<()> {
             cookie_secure: cfg.cookie_secure,
             origin: cfg.write_origin.clone(),
         },
+        assets.clone(),
+        cfg.public_origin.clone(),
     );
     let authoring =
         axum::serve(write_listener, authoring_router).with_graceful_shutdown(shutdown_signal());

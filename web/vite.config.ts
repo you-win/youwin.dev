@@ -19,6 +19,12 @@ export default defineConfig({
     proxy: {
       "/api": "http://127.0.0.1:8081",
       "/preview": "http://127.0.0.1:8081",
+      // /preview renders through the PUBLIC templates, so it links the public
+      // site's stylesheet — which lives on the public listener, not this one.
+      // Vite serves its own modules from /src and /@vite in dev and never uses
+      // /assets, so forwarding it is free. Production solves this in the Caddy
+      // write block; see deploy/Caddyfile.youwin.dev.
+      "/assets": "http://127.0.0.1:8080",
     },
   },
 });

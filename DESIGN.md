@@ -336,6 +336,13 @@ block matches first, so the process still never touches a CSS byte; this exists 
 "correct but uncached" rather than "unstyled". Without it the request falls through to the
 404 handler and the browser discards a stylesheet served as `text/html`.
 
+**This bundle must also be reachable from the authoring host.** `/preview` renders through
+these same templates, so it links the public stylesheet by its root-absolute path — which
+resolves against `write.youwin.dev`, where the SPA's assets live instead. Caddy's write
+block therefore serves `/assets/public-*` from the public root, ordered ahead of the SPA
+assets, and Vite's dev proxy forwards `/assets` to the public listener for the same reason.
+Without both, the preview renders unstyled, which is precisely the thing it exists to show.
+
 **Edge caching.** Cookieless and JS-free means Cloudflare can cache the whole surface.
 `Cache-Control: public, max-age=60, s-maxage=300` plus a Cloudflare cache rule (CF does not
 cache HTML by default). The cost is that an edit or delete takes up to five minutes to
@@ -671,7 +678,7 @@ policy, since it survives SQLite itself.
 | **M0** | Skeleton | ✅ **Done.** Zola tree deleted. Workspace, config, the two pools, `sqlx::migrate!()` on boot (schema landed here — `migrate!()` wants a real migration), two listeners with health checks, `tests/pools.rs`. `theme.css` split into `public.css` + `app.css` |
 | **M1** | **The entire public site** | ✅ **Done.** `youwin-server seed`, maud templates, feed + cursor pagination, permalinks, threads, Atom, markdown pipeline, asset-manifest lookup, themed 404. 26 tests green, covering every statement in `db/`. *Still to do before it is actually live: put the Caddy block and the Cloudflare cache rule on the box, alongside M2.* |
 | **M2** | Auth | ✅ **Code done.** `hash-password`, login, sessions, structural guard, throttling, Origin check. 61 tests green. Deploy artifacts written to [`deploy/`](deploy/README.md) — **installing them on the server is still outstanding**, including the Cloudflare cache rule without which M1's caching headers are inert |
-| **M3** | Authoring app | Solid SPA, composer, create/edit/soft-delete, drafts, replies, `/preview/:id` |
+| **M3** | Authoring app | ✅ **Done.** Solid SPA — composer with optimistic insert, inline edit, create/edit/soft-delete, drafts, replies, `/preview/:id` through the public templates. 81 tests green |
 | **M4** | PWA | Manifest, service worker, offline feed, install prompt, share sheet |
 | **M5** | Polish | FTS5 search, hashtags, `export`, backup timer, optional cache purge on write |
 

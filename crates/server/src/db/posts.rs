@@ -11,8 +11,11 @@ use sqlx::SqlitePool;
 
 use crate::render::markdown;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, serde::Serialize, serde::Deserialize,
+)]
 #[sqlx(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum Visibility {
     /// In the feed, in the Atom document, indexable.
     Public,
@@ -46,6 +49,32 @@ pub struct FeedRow {
     #[sqlx(flatten)]
     pub post: Post,
     pub reply_count: i64,
+}
+
+/// A post as the *authoring* side needs it: everything above plus `body`, the
+/// markdown source an edit form loads. Only this side pays for that column.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct AuthoredRow {
+    #[sqlx(flatten)]
+    pub post: Post,
+    pub body: String,
+    pub reply_count: i64,
+}
+
+impl Visibility {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Unlisted => "unlisted",
+            Self::Draft => "draft",
+        }
+    }
+
+    /// A draft is unpublished, so editing one is not "editing" in the sense the
+    /// `edited` marker means. Only published posts grow an `edited_at`.
+    pub fn is_published(self) -> bool {
+        matches!(self, Self::Public | Self::Unlisted)
+    }
 }
 
 /// Keyset pagination position. Opaque to the client; `{created_at}:{id}` inside.
@@ -155,6 +184,224 @@ const THREAD: &str = "
       FROM posts
      WHERE root_id = ?1 AND deleted_at IS NULL AND visibility <> 'draft'
      ORDER BY created_at ASC, id ASC";
+
+// ---------------------------------------------------------------------------
+// Authoring queries. These see everything: drafts, unlisted, all of it. They are
+// reachable only from write.youwin.dev, behind the session guard.
+// ---------------------------------------------------------------------------
+
+// The column list is repeated across the four queries below rather than shared
+// through `format!`. sqlx 0.9 refuses runtime-built SQL (`SqlSafeStr`), and the
+// escape hatch is `AssertSqlSafe` — not worth taking to save nine duplicated
+// lines. Literal queries are also greppable, which the assembled ones were not.
+const AUTHORED_FEED: &str = "
+    SELECT p.id, p.public_id, p.parent_id, p.root_id,
+           p.body, p.body_html, p.body_text, p.visibility, p.created_at, p.edited_at,
+           (SELECT count(*) FROM posts r
+             WHERE r.root_id = p.id AND r.id <> p.id AND r.deleted_at IS NULL) AS reply_count
+      FROM posts p
+     WHERE p.deleted_at IS NULL
+       AND p.parent_id IS NULL
+       AND (p.created_at, p.id) < (?1, ?2)
+     ORDER BY p.created_at DESC, p.id DESC
+     LIMIT ?3";
+
+const AUTHORED_BY_PUBLIC_ID: &str = "
+    SELECT p.id, p.public_id, p.parent_id, p.root_id,
+           p.body, p.body_html, p.body_text, p.visibility, p.created_at, p.edited_at,
+           (SELECT count(*) FROM posts r
+             WHERE r.root_id = p.id AND r.id <> p.id AND r.deleted_at IS NULL) AS reply_count
+      FROM posts p
+     WHERE p.public_id = ?1 AND p.deleted_at IS NULL";
+
+const AUTHORED_THREAD: &str = "
+    SELECT p.id, p.public_id, p.parent_id, p.root_id,
+           p.body, p.body_html, p.body_text, p.visibility, p.created_at, p.edited_at,
+           (SELECT count(*) FROM posts r
+             WHERE r.root_id = p.id AND r.id <> p.id AND r.deleted_at IS NULL) AS reply_count
+      FROM posts p
+     WHERE p.root_id = ?1 AND p.deleted_at IS NULL
+     ORDER BY p.created_at ASC, p.id ASC";
+
+const AUTHORED_DRAFTS: &str = "
+    SELECT p.id, p.public_id, p.parent_id, p.root_id,
+           p.body, p.body_html, p.body_text, p.visibility, p.created_at, p.edited_at,
+           (SELECT count(*) FROM posts r
+             WHERE r.root_id = p.id AND r.id <> p.id AND r.deleted_at IS NULL) AS reply_count
+      FROM posts p
+     WHERE p.deleted_at IS NULL AND p.visibility = 'draft'
+     ORDER BY p.created_at DESC, p.id DESC";
+
+/// One page of thread roots at every visibility, newest first.
+pub async fn authored_feed(
+    pool: &SqlitePool,
+    cursor: Cursor,
+    limit: i64,
+) -> Result<(Vec<AuthoredRow>, Option<Cursor>), sqlx::Error> {
+    let mut rows: Vec<AuthoredRow> = sqlx::query_as(AUTHORED_FEED)
+        .bind(cursor.created_at)
+        .bind(cursor.id)
+        .bind(limit + 1)
+        .fetch_all(pool)
+        .await?;
+
+    let next = if rows.len() as i64 > limit {
+        rows.truncate(limit as usize);
+        rows.last().map(|row| Cursor {
+            created_at: row.post.created_at,
+            id: row.post.id,
+        })
+    } else {
+        None
+    };
+
+    Ok((rows, next))
+}
+
+/// A post by public id, drafts included. The authoring counterpart to
+/// `by_public_id`, which hides them.
+pub async fn authored_by_public_id(
+    pool: &SqlitePool,
+    public_id: &str,
+) -> Result<Option<AuthoredRow>, sqlx::Error> {
+    sqlx::query_as(AUTHORED_BY_PUBLIC_ID)
+        .bind(public_id)
+        .fetch_optional(pool)
+        .await
+}
+
+/// A whole thread, drafts included, oldest first.
+pub async fn authored_thread(
+    pool: &SqlitePool,
+    root_id: i64,
+) -> Result<Vec<AuthoredRow>, sqlx::Error> {
+    sqlx::query_as(AUTHORED_THREAD)
+        .bind(root_id)
+        .fetch_all(pool)
+        .await
+}
+
+/// Drafts, newest first. Replies included — a half-written reply is still a
+/// draft you want to find again.
+pub async fn drafts(pool: &SqlitePool) -> Result<Vec<AuthoredRow>, sqlx::Error> {
+    sqlx::query_as(AUTHORED_DRAFTS).fetch_all(pool).await
+}
+
+/// Edits a post, re-rendering when the body changed.
+///
+/// `edited_at` is set only when a *published* post's body actually changes:
+/// re-saving a draft is not an edit in the sense the marker means, and neither
+/// is flipping visibility without touching the text.
+pub async fn update(
+    pool: &SqlitePool,
+    public_id: &str,
+    body: Option<&str>,
+    visibility: Option<Visibility>,
+    now: i64,
+) -> Result<Option<AuthoredRow>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    let current: Option<(i64, String, Visibility, Option<i64>)> = sqlx::query_as(
+        "SELECT id, body, visibility, edited_at FROM posts
+          WHERE public_id = ?1 AND deleted_at IS NULL",
+    )
+    .bind(public_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some((id, current_body, current_visibility, current_edited)) = current else {
+        return Ok(None);
+    };
+
+    let new_body = body.unwrap_or(&current_body);
+    let body_changed = new_body != current_body;
+    let rendered = markdown::render(new_body);
+    let new_visibility = visibility.unwrap_or(current_visibility);
+
+    let edited_at = if body_changed && current_visibility.is_published() {
+        Some(now)
+    } else {
+        current_edited
+    };
+
+    sqlx::query(
+        "UPDATE posts
+            SET body = ?2, body_html = ?3, body_text = ?4,
+                visibility = ?5, updated_at = ?6, edited_at = ?7
+          WHERE id = ?1",
+    )
+    .bind(id)
+    .bind(new_body)
+    .bind(&rendered.html)
+    .bind(&rendered.text)
+    .bind(new_visibility)
+    .bind(now)
+    .bind(edited_at)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    authored_by_public_id(pool, public_id).await
+}
+
+/// Soft-deletes a post, and a thread when the post is its root.
+///
+/// Deleting a root must take its replies with it, or they stay reachable at
+/// their own permalinks with the post they answered gone. A reply deletes alone.
+/// Returns the number of rows affected, or `None` if there was nothing to delete.
+pub async fn soft_delete(
+    pool: &SqlitePool,
+    public_id: &str,
+    now: i64,
+) -> Result<Option<u64>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    let target: Option<(i64, Option<i64>)> = sqlx::query_as(
+        "SELECT id, parent_id FROM posts WHERE public_id = ?1 AND deleted_at IS NULL",
+    )
+    .bind(public_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some((id, parent_id)) = target else {
+        return Ok(None);
+    };
+
+    let affected = if parent_id.is_none() {
+        sqlx::query(
+            "UPDATE posts SET deleted_at = ?2, updated_at = ?2
+              WHERE root_id = ?1 AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+    } else {
+        sqlx::query("UPDATE posts SET deleted_at = ?2, updated_at = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+    };
+
+    tx.commit().await?;
+    Ok(Some(affected))
+}
+
+/// Resolves a public id to a rowid, for turning a `parent_public_id` from the
+/// wire into the `parent_id` `insert` wants.
+pub async fn id_for_public_id(
+    pool: &SqlitePool,
+    public_id: &str,
+) -> Result<Option<i64>, sqlx::Error> {
+    sqlx::query_scalar("SELECT id FROM posts WHERE public_id = ?1 AND deleted_at IS NULL")
+        .bind(public_id)
+        .fetch_optional(pool)
+        .await
+}
 
 /// One page of thread roots, newest first.
 ///

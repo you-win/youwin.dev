@@ -22,6 +22,11 @@ pub enum AppError {
     #[error("forbidden")]
     Forbidden,
 
+    /// A request the client could fix. The message is shown to me in the
+    /// composer, so it is written for a person rather than a log.
+    #[error("invalid: {0}")]
+    Invalid(&'static str),
+
     /// Login throttling. Carries the seconds until the next attempt is allowed,
     /// which the client echoes as `Retry-After`.
     #[error("too many attempts")]
@@ -41,6 +46,7 @@ impl AppError {
                 "Authentication required.",
             ),
             Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden", "Refused."),
+            Self::Invalid(message) => (StatusCode::UNPROCESSABLE_ENTITY, "invalid", message),
             Self::TooManyAttempts(_) => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "too_many_attempts",
