@@ -338,6 +338,14 @@ Then **re-run the failed workflow** from the Actions tab. This time activation
 finds a service it can restart, both health checks pass, and it goes green —
 which is also the proof that the whole pipeline works end to end.
 
+Now actually use it: open `https://write.youwin.dev`, sign in with the password
+you just set, and post something. Then check it appears at `https://youwin.dev`.
+
+That is the acceptance test for everything above — TLS on both hosts, the session
+cookie, the write pool, the render pipeline, and the public read path — and it
+has to happen before step 11 can be verified at all, since there is nothing to
+purge until something has been written.
+
 **9a. [dashboard] Turn on the proxy**
 
 Set **SSL/TLS → Overview → Full (strict)** first. Cloudflare's default on a new
@@ -494,6 +502,69 @@ response body**, which names the reason — a 404 means the zone ID is wrong, a 
 means the token lacks Cache Purge or is not scoped to this zone. That body is
 logged for exactly this moment; a bare status code would leave those two
 indistinguishable.
+
+## Verifying the setup
+
+Worth running once at the end, and again any time something behaves oddly. Each
+line checks a specific thing an earlier step was supposed to establish; the
+comment says what "right" looks like.
+
+```bash
+# 1 — ownership. The split is the point: only releases/ belongs to deploy.
+ls -ld /srv/sites/youwin.dev /srv/sites/youwin.dev/releases \
+       /var/lib/youwin /var/backups/youwin /etc/youwin
+#   /srv/sites/youwin.dev            root:root     755
+#   /srv/sites/youwin.dev/releases   deploy:deploy 755
+#   /var/lib/youwin                  youwin:youwin 750
+
+# 2 — the privilege boundary, as sudo itself sees it.
+ls -l /usr/local/bin/activate-youwin        # root:root 755
+sudo -l -U deploy                           # exactly one NOPASSWD entry
+
+# 3 — units installed; youwin enabled, backup timer enabled.
+systemctl is-enabled youwin youwin-backup.timer
+
+# 4 — all three names resolve.
+dig +short youwin.dev www.youwin.dev write.youwin.dev
+
+# 5 — Caddy has the DNS module, is held back from apt, can read its token,
+#     and owns its own log files.
+caddy list-modules | grep dns.providers.cloudflare
+apt-mark showhold | grep -x caddy           # must print: caddy
+ls -l /etc/caddy/caddy.env                  # root:caddy 640
+systemctl cat caddy | grep EnvironmentFile  # the drop-in is in effect
+ls -l /var/log/caddy                        # every file caddy:caddy, none root
+
+# 6-8 — a release is live, the service is up, the secret is locked down.
+readlink -f /srv/sites/youwin.dev/current
+/srv/sites/youwin.dev/current/bin/youwin-server version
+systemctl is-active youwin
+ls -l /etc/youwin/secrets.env               # root:root 600
+
+# 9 — the public site caches, the authoring host does not. See below.
+curl -fsSI https://youwin.dev | grep -i cf-cache-status
+curl -fsSI https://youwin.dev | grep -i cf-cache-status
+curl -fsSI https://write.youwin.dev/api/health | grep -i cf-cache-status
+
+# 10 — the timer is scheduled and the last run exited clean.
+systemctl list-timers youwin-backup.timer
+systemctl show -p ExecMainStatus youwin-backup.service   # 0
+ls -l /var/backups/youwin
+```
+
+**The one to look at hardest is `write.youwin.dev`.** If it reports anything
+other than `DYNAMIC` — a `HIT`, a `MISS`, an `EXPIRED` — the cache rule from step
+9b is matching the authoring host, which means Cloudflare is caching
+authenticated responses at the edge. That happens when the rule was built on the
+dashboard's default *All incoming requests* rather than a filter expression.
+Fix it by editing the rule to use:
+
+```
+(http.host in {"youwin.dev" "www.youwin.dev"})
+```
+
+then **Caching → Configuration → Purge Everything** to discard whatever it
+already stored.
 
 ## Moving timothyyuen.io onto Cloudflare at the same time
 
