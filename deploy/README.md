@@ -272,21 +272,21 @@ Generate a deploy key *for CI only* — not your admin key. It goes on the
 `deploy` user, which has no password and cannot log in interactively.
 
 ```bash
-ssh-keygen -t ed25519 -N '' -C 'github-actions youwin.dev' -f ~/.ssh/~/.ssh/youwindev_deploy
+ssh-keygen -t ed25519 -N '' -C 'github-actions youwin.dev' -f ~/.ssh/youwindev_deploy
 ssh-keyscan -t ed25519 server.example       # for DEPLOY_KNOWN_HOSTS
 ```
 
 Install the public half on the server:
 
 ```bash
-sudo tee -a /home/deploy/.ssh/authorized_keys < ~/.ssh/~/.ssh/youwindev_deploy.pub
+sudo tee -a /home/deploy/.ssh/authorized_keys < ~/.ssh/youwindev_deploy.pub
 ```
 
 In the repo's **Settings → Secrets and variables → Actions**:
 
 | Secret | Value |
 |---|---|
-| `DEPLOY_SSH_KEY` | the whole of `~/.ssh/~/.ssh/youwindev_deploy` (private half) |
+| `DEPLOY_SSH_KEY` | the whole of `~/.ssh/youwindev_deploy` (private half) |
 | `DEPLOY_KNOWN_HOSTS` | the `ssh-keyscan` output |
 | `DEPLOY_HOST` | `server.example` |
 
