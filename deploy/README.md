@@ -204,10 +204,31 @@ Cloudflare API that reads nothing like a permissions problem.
 
 ```bash
 sudo install -m 644 -o root -g root deploy/youwin.dev.caddy /etc/caddy/conf.d/youwin.dev.caddy
-sudo caddy validate --config /etc/caddy/Caddyfile
+
+# Validate with the token in scope, then hand the log files back to caddy.
+# Both halves matter — see below.
+sudo bash -c 'set -a; . /etc/caddy/caddy.env; caddy validate --config /etc/caddy/Caddyfile'
+sudo chown -R caddy:caddy /var/log/caddy
+
 sudo systemctl reload caddy
 journalctl -u caddy -f          # watch both certificates get issued
 ```
+
+Two things about that validate command, both of which bite as a plain
+`sudo caddy validate --config /etc/caddy/Caddyfile`:
+
+- **The token has to be in the environment.** It lives in the systemd
+  `EnvironmentFile`, which a root shell knows nothing about, so validation
+  reaches TLS provisioning and dies with
+  `API token '' appears invalid`. Nothing is wrong with the config; it just
+  cannot see the token. Sourcing `caddy.env` first fixes it — and as a side
+  benefit, the Cloudflare module sanity-checks the token's *shape*, so a
+  truncated paste is caught here rather than at first renewal.
+- **Validation creates the log files.** It provisions the whole config, log
+  writers included, so it creates `/var/log/caddy/*.log` **mode 0600 owned by
+  whoever ran it** — root. Caddy then runs as `caddy`, cannot open its own log,
+  and fails to start. The `chown` puts that right. (Worth running once over the
+  whole directory anyway if you have ever validated as root before.)
 
 Issuance takes a few seconds per hostname. Requests arriving in that window get a
 TLS handshake failure, so do this promptly rather than leaving it half-done.
@@ -402,7 +423,8 @@ www.timothyyuen.io {
 	redir https://timothyyuen.io{uri} permanent
 }
 EOF
-sudo caddy validate --config /etc/caddy/Caddyfile
+sudo bash -c 'set -a; . /etc/caddy/caddy.env; caddy validate --config /etc/caddy/Caddyfile'
+sudo chown -R caddy:caddy /var/log/caddy
 sudo systemctl reload caddy
 ```
 
