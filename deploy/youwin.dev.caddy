@@ -1,8 +1,14 @@
-# youwin.dev — append to the server's Caddyfile, or import it from there.
+# /etc/caddy/conf.d/youwin.dev.caddy
 #
-# Follows the house style in grindshell/server-configs/static/Caddyfile:
-# Cloudflare DNS-01, loopback-only backends, two-tier caching, baseline
-# security headers.
+# Picked up by the `import /etc/caddy/conf.d/*.caddy` at the end of the main
+# Caddyfile, the same way the static sites on this box are.
+#
+# TLS is Cloudflare DNS-01, matching the house style in
+# grindshell/server-configs/static/Caddyfile — which needs a Caddy binary built
+# with github.com/caddy-dns/cloudflare. The package from the Cloudsmith repo
+# does NOT have it, and `caddy validate` fails outright with
+# "module not registered: dns.providers.cloudflare" until it does. See
+# deploy/README.md step 5.
 
 # The public archive. No JS, no cookies, no API — so the whole surface is
 # edge-cacheable and the CSP can forbid script outright.
@@ -57,6 +63,13 @@ youwin.dev, www.youwin.dev {
                 # so this is the only line that governs it.
                 Content-Security-Policy "default-src 'none'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
                 -Server
+        }
+
+        log {
+                output file /var/log/caddy/youwin.dev.log {
+                        roll_size 10MiB
+                        roll_keep 5
+                }
         }
 }
 
@@ -126,5 +139,12 @@ write.youwin.dev {
                 Strict-Transport-Security "max-age=31536000; includeSubDomains"
                 Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
                 -Server
+        }
+
+        log {
+                output file /var/log/caddy/write.youwin.dev.log {
+                        roll_size 10MiB
+                        roll_keep 5
+                }
         }
 }

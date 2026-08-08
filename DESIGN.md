@@ -110,7 +110,7 @@ youwin.dev/
 ├─ .github/workflows/
 │  └─ deploy.yml              # build, test, ship, activate — the normal path
 └─ deploy/
-   ├─ Caddyfile.youwin.dev    # both blocks
+   ├─ youwin.dev.caddy        # both blocks; installs to /etc/caddy/conf.d/
    ├─ youwin.service
    ├─ youwin-backup.{service,timer}
    ├─ activate-youwin         # the one command CI may run as root
@@ -673,9 +673,20 @@ property, so `@theme` cannot hold it.
 
 ## Deployment
 
-**Caddy** — `deploy/Caddyfile.youwin.dev`, following the house style in
-`grindshell/server-configs/static/Caddyfile` (Cloudflare DNS-01, loopback backends,
+**Caddy** — `deploy/youwin.dev.caddy`, installed to `/etc/caddy/conf.d/` where the box's
+`import /etc/caddy/conf.d/*.caddy` picks it up alongside the static sites. Follows the house
+style in `grindshell/server-configs/static/Caddyfile` (Cloudflare DNS-01, loopback backends,
 two-tier cache, baseline security headers).
+
+DNS-01 costs a non-stock Caddy: `dns.providers.cloudflare` is not in the Cloudsmith package,
+so the binary has to be replaced via `caddy add-package` and then held back from `apt`, which
+would otherwise restore the stock build and leave Caddy unable to load its own config. That
+is a real maintenance cost, taken because DNS-01 is the only issuance path that keeps working
+regardless of whether the Cloudflare proxy is on — TLS-ALPN cannot work behind it at all, and
+HTTP-01 makes renewal depend on Cloudflare forwarding ACME challenges to the origin. The
+alternative that avoids the custom build entirely is a Cloudflare Origin CA certificate,
+rejected because it is trusted only by Cloudflare: turning the proxy off would break the site
+for browsers, which is exactly the wrong failure mode for the escape hatch.
 
 ```caddyfile
 # The public archive. No JS, no cookies, no API — so the whole surface is

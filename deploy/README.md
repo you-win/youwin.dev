@@ -117,18 +117,123 @@ sudo systemctl daemon-reload
 
 Do **not** enable `youwin` yet — there is no binary and no password hash. Step 6.
 
-**4. [dashboard] DNS**
+**4. [dashboard] DNS, on Cloudflare**
 
-Add an `A`/`AAAA` record for `write.youwin.dev` alongside the apex. Caddy issues
-its certificate through the same Cloudflare DNS-01 flow; no extra config.
+The zone has to be on Cloudflare before step 5 can work: TLS here is DNS-01,
+which proves control by writing a `_acme-challenge` TXT record through the
+Cloudflare API, so Cloudflare must be authoritative for `youwin.dev`. Add the
+zone, change the nameservers at the registrar, wait for **Active**.
+
+Then `A`/`AAAA` records for the apex, `www`, and `write` — all pointing at this
+server. Leave them **DNS-only (grey cloud)** for now. The proxy goes on in step
+7, once TLS is confirmed working, so that a certificate problem and a proxy
+problem cannot arrive at the same time.
 
 **5. [server] Caddy**
 
-Append `deploy/Caddyfile.youwin.dev` to the server Caddyfile (or `import` it):
+Three parts, in order: the plugin, the token, then the site file. Installing the
+site file before the other two gets you a Caddy that will not load its config at
+all — including for the sites already on the box.
+
+> **The stock Caddy package cannot do this.** `youwin.dev.caddy` asks for TLS via
+> Cloudflare DNS-01, which lives in `github.com/caddy-dns/cloudflare` — a module
+> the Cloudsmith package does not ship. Drop the site file in first and
+> `caddy validate` fails with
+> `module not registered: dns.providers.cloudflare`. Loud, at least, rather than
+> a site that half works.
+>
+> If you would rather not replace the binary, see *Alternatives to DNS-01* at
+> the end of this step.
+
+**5a. Give Caddy the Cloudflare DNS module.**
 
 ```bash
-sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy
+sudo caddy add-package github.com/caddy-dns/cloudflare
+caddy list-modules | grep dns.providers.cloudflare   # expect one line
+sudo systemctl restart caddy
 ```
+
+`add-package` downloads a replacement binary from Caddy's build service and
+writes it over `/usr/bin/caddy` — the same path the `.deb` owns. So:
+
+```bash
+sudo apt-mark hold caddy
+```
+
+Without the hold, the next `apt upgrade` silently restores the stock binary and
+Caddy then refuses to start, because its config references a module that is no
+longer there — a broken site at whatever hour you happened to run an upgrade.
+Debian's unattended-upgrades only covers Debian's own origins, not Cloudsmith,
+so this is a manual-upgrade hazard rather than an overnight one. Update Caddy
+with its own updater instead, which preserves the module set:
+
+```bash
+sudo caddy upgrade && sudo systemctl restart caddy
+```
+
+**5b. The API token.** Create one at Cloudflare → My Profile → API Tokens, with
+the **Edit zone DNS** template scoped to `youwin.dev` (and `timothyyuen.io` too,
+if you are doing step 12). This is a *third* token, separate from the cache-purge
+one in step 10 — different jobs, different blast radius.
+
+The Caddyfile reads it as `{env.CF_API_TOKEN}`, and Caddy's unit does not load an
+environment file by default:
+
+```bash
+printf 'CF_API_TOKEN=%s\n' '<token>' | sudo tee /etc/caddy/caddy.env
+sudo chown root:caddy /etc/caddy/caddy.env
+sudo chmod 640 /etc/caddy/caddy.env
+
+sudo systemctl edit caddy      # creates a drop-in; do not edit the unit itself
+```
+
+```ini
+[Service]
+EnvironmentFile=/etc/caddy/caddy.env
+```
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl restart caddy
+```
+
+`0640 root:caddy` rather than `0600 root:root`: the unit runs as `caddy`, and a
+file it cannot read produces an empty token and an authentication error from the
+Cloudflare API that reads nothing like a permissions problem.
+
+**5c. The site file.**
+
+```bash
+sudo install -m 644 -o root -g root deploy/youwin.dev.caddy /etc/caddy/conf.d/youwin.dev.caddy
+sudo caddy validate --config /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+journalctl -u caddy -f          # watch both certificates get issued
+```
+
+Issuance takes a few seconds per hostname. Requests arriving in that window get a
+TLS handshake failure, so do this promptly rather than leaving it half-done.
+
+Confirm before moving on:
+
+```bash
+curl -fsSI https://youwin.dev | head -1
+curl -fsSI https://write.youwin.dev | head -1
+```
+
+> `Strict-Transport-Security` with `includeSubDomains` is set on both blocks,
+> which commits every browser that sees it to HTTPS-only across `youwin.dev` for
+> a year. That is intended, but it means `write.youwin.dev` has to have working
+> TLS from the moment the apex is first served — which is why both go live
+> together rather than one at a time.
+
+**Alternatives to DNS-01**, if replacing the Caddy binary is unappealing:
+
+| | |
+|---|---|
+| **HTTP-01 / TLS-ALPN** — delete the `tls` blocks entirely | Stock Caddy, zero setup. Works today. But TLS-ALPN cannot work once the orange cloud is on (Cloudflare terminates TLS), leaving HTTP-01 as the only path, which depends on Cloudflare forwarding `/.well-known/acme-challenge` to the origin. It does, but renewal now has a dependency you did not choose. |
+| **Cloudflare Origin CA** — `tls /path/cert.pem /path/key.pem` | A free 15-year certificate, no ACME at all. But it is trusted *only* by Cloudflare, so the site breaks for browsers the moment the proxy is turned off — and requires SSL mode "Full (strict)". |
+
+DNS-01 is the one that keeps working whatever the proxy is doing, which is why
+it is the default here.
 
 **6. [local, then server] First release and the password**
 
@@ -162,16 +267,47 @@ never succeed.
 > stripped on the way in for exactly this reason; the point is that the failure
 > it used to cause was invisible.
 
-**7. [dashboard] The Cloudflare cache rule — do not skip this**
+**7. [dashboard] Turn on the proxy, then the cache rule — do not skip this**
 
-The public site sends `Cache-Control: public, max-age=60, s-maxage=300`, but
-**Cloudflare does not cache HTML by default**, so that header is inert until a
-cache rule exists. Without it every request reaches the origin and the main
-benefit of a cookieless, JS-free site is left on the table.
+Set **SSL/TLS → Overview → Full (strict)** first. Cloudflare's default on a new
+zone can be Flexible, which terminates TLS at the edge and speaks *plain HTTP* to
+the origin — with HSTS being sent by both blocks, that is a redirect loop waiting
+to happen. Full (strict) is correct here because the origin has a real
+publicly-trusted certificate from step 5.
+
+Now flip the apex, `www` and `write` records from grey to **orange**. Confirm the
+site still answers, and that it is now coming through Cloudflare:
+
+```bash
+curl -fsSI https://youwin.dev | grep -iE 'server|cf-ray'
+```
+
+Finally the cache rule. The public site sends
+`Cache-Control: public, max-age=60, s-maxage=300`, but **Cloudflare does not
+cache HTML by default**, so that header is inert until a rule exists. Without it
+every request reaches the origin and the main benefit of a cookieless, JS-free
+site is left on the table.
 
 Caching → Cache Rules → for `youwin.dev`, "Eligible for cache" with "Respect
 origin TTL". Do **not** apply it to `write.youwin.dev`, which is entirely
-authenticated.
+authenticated — and note the rule must not match `/api/*` or `/preview/*` even on
+the apex, though neither exists there.
+
+Verify it is actually caching, which is the whole point and the easiest thing to
+believe without checking:
+
+```bash
+curl -fsSI https://youwin.dev | grep -i cf-cache-status   # MISS, then HIT
+curl -fsSI https://youwin.dev | grep -i cf-cache-status
+```
+
+> Once the proxy is on, the origin sees Cloudflare's addresses rather than
+> visitors'. The app reads `CF-Connecting-IP` for its login throttle, which is
+> sound because the backend binds loopback only and Caddy is its sole possible
+> peer. It does mean someone who finds the origin IP could reach port 443
+> directly and spoof that header to sidestep the throttle. If that bothers you,
+> restrict 80/443 to [Cloudflare's ranges](https://www.cloudflare.com/ips/) with
+> `ufw` — worth doing eventually, not a blocker.
 
 **8. [server] Backups**
 
@@ -220,6 +356,100 @@ sudo sed -i 's|^#Environment=YOUWIN_CF_ZONE_ID=.*|Environment=YOUWIN_CF_ZONE_ID=
 sudo systemctl daemon-reload && sudo systemctl restart youwin
 journalctl -u youwin -n 20 | grep 'edge cache'   # expect: cache_purging="on"
 ```
+
+## Moving timothyyuen.io onto Cloudflare at the same time
+
+Optional, and genuinely convenient to do here: step 5b replaced the Caddy binary
+with one that can do Cloudflare DNS-01, and that binary serves every site on the
+box. The static site can use it too, and gets a CDN in front of it.
+
+Do this **after** `youwin.dev` is fully working. If something is wrong with the
+new Caddy binary or the token, you want to find out on the site that is not yet
+carrying traffic.
+
+**1. [dashboard] Add the zone.** Add `timothyyuen.io` to Cloudflare and change the
+nameservers at the registrar. Cloudflare imports the existing records; check the
+apex and `www` came across pointing at this server's IP before the zone goes
+Active.
+
+Because the record *values* do not change — same server, same address — the
+nameserver migration itself is invisible to visitors. Nothing moves until you
+turn the orange cloud on, which is step 4.
+
+**2. [dashboard] Widen the DNS token.** The token from step 5b needs
+`timothyyuen.io` in its zone list as well. Edit it in place rather than making a
+second one; Caddy reads a single `CF_API_TOKEN` for every site it manages.
+
+**3. [server] Switch its TLS to DNS-01.** Its certificate currently comes from
+HTTP-01 or TLS-ALPN, and TLS-ALPN stops working the moment the proxy is on —
+Cloudflare terminates TLS at the edge, so the challenge never reaches the origin.
+Rather than depend on Cloudflare forwarding ACME challenges over port 80, move it
+to the same mechanism `youwin.dev` uses:
+
+```bash
+sudo tee /etc/caddy/conf.d/timothyyuen.io.caddy <<'EOF'
+timothyyuen.io {
+	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+	}
+	import static_site timothyyuen.io
+}
+
+www.timothyyuen.io {
+	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+	}
+	redir https://timothyyuen.io{uri} permanent
+}
+EOF
+sudo caddy validate --config /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
+
+The existing certificate stays valid until it expires, so this changes nothing
+visible today — it changes what happens at the *next renewal*, which is exactly
+the failure you do not want to discover sixty days from now. Force the issue and
+confirm it works now rather than trusting it:
+
+```bash
+# Ask for a fresh certificate through the new path.
+sudo systemctl stop caddy
+sudo rm -rf /var/lib/caddy/.local/share/caddy/certificates/*/timothyyuen.io
+sudo systemctl start caddy
+journalctl -u caddy -f     # expect: obtaining certificate, using DNS challenge
+curl -fsSI https://timothyyuen.io | head -1
+```
+
+**4. [dashboard] Turn on the proxy.** SSL/TLS → **Full (strict)** first, for the
+same reason as step 7 — Flexible plus the site's HSTS header is a redirect loop.
+Then flip the apex and `www` to orange.
+
+No cache rule is needed. The `(static_site)` snippet already sends
+`max-age=31536000, immutable` for `/_build/*` and `max-age=0, must-revalidate`
+for everything else, and Cloudflare respects both: the hashed bundles cache at
+the edge, HTML always revalidates, and a deploy is visible immediately. That is a
+nicer arrangement than `youwin.dev` has, and it comes for free from the headers
+already being right.
+
+**5. Check what the logs are now recording.** With the proxy on, Caddy's access
+log for that site records Cloudflare's addresses rather than visitors'. If the
+log is only ever read for debugging, ignore this. If you want real client
+addresses, add to the global block in `/etc/caddy/Caddyfile`:
+
+```
+servers {
+	trusted_proxies static <cloudflare ranges…>
+	client_ip_headers CF-Connecting-IP
+}
+```
+
+Keeping that list current is a maintenance job, which is why it is a footnote
+rather than a step.
+
+**Rolling it back** is one dashboard toggle: set the records back to DNS-only.
+The origin certificate is a real publicly-trusted one, so the site keeps working
+with the proxy off — which is precisely the property DNS-01 buys and an Origin CA
+certificate would not.
 
 ## Routine deploys
 
