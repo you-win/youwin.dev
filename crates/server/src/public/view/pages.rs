@@ -8,6 +8,7 @@ use crate::{
         search,
         tags::TagCount,
     },
+    familiar::Reading,
     public::{assets::Assets, view::post},
     tag, url,
 };
@@ -39,12 +40,18 @@ fn pager(newest: &str, older: Option<String>, is_first_page: bool) -> Markup {
 ///
 /// Pagination is a link, not a scroll sentinel: crawlable, linkable, and
 /// back-button-correct. `older` is `None` on the last page.
+///
+/// `familiar` is `Some` only on the first page. The pet reads the *whole*
+/// archive and says nothing about the twenty posts under it, so repeating it
+/// down the pagination would be twenty copies of one fact — and the second page
+/// is `noindex` scaffolding, not somewhere anyone lands.
 pub fn feed(
     assets: &Assets,
     origin: &str,
     rows: &[FeedRow],
     older: Option<Cursor>,
     is_first_page: bool,
+    familiar: Option<&Reading>,
 ) -> Markup {
     let canonical = if is_first_page {
         format!("{origin}/")
@@ -63,6 +70,10 @@ pub fn feed(
     page.noindex = !is_first_page;
 
     let content = html! {
+        @if let Some(reading) = familiar {
+            div class="mb-6" { (super::familiar::widget(reading)) }
+        }
+
         @if rows.is_empty() {
             p class="text-secondary" { "Nothing here yet." }
         } @else {
@@ -74,6 +85,32 @@ pub fn feed(
         }
 
         (pager("/", older.map(|c| format!("/?before={}", c.encode())), is_first_page))
+    };
+
+    super::layout::render(assets, &page, content)
+}
+
+/// The familiar's own page: the pet at full size, with the numbers under it.
+pub fn familiar(assets: &Assets, origin: &str, reading: &Reading) -> Markup {
+    let page = super::layout::Page::new(
+        "The Familiar — youwin.dev",
+        "A kaomoji that reads the archive's temperature.",
+        format!("{origin}/familiar"),
+    );
+
+    let content = html! {
+        div class="mb-6 flex items-baseline justify-between" {
+            h1 class="text-lg font-medium" { "The Familiar" }
+            a href="/" class="text-sm text-secondary" { "← the feed" }
+        }
+
+        (super::familiar::sheet(reading))
+
+        p class="mt-8 text-sm text-secondary" {
+            "Everything above is derived from the posts on this site — what they are "
+            "about, how they read, and how long it has been since the last one. "
+            "It changes on its own, about every five minutes."
+        }
     };
 
     super::layout::render(assets, &page, content)

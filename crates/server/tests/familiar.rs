@@ -1,0 +1,190 @@
+//! The familiar end to end: its one statement, its snapshot, and the two pages
+//! it appears on.
+//!
+//! The statement in `db::familiar` is runtime-checked like every other, so these
+//! tests are the only thing between a renamed column and an empty pet on the
+//! front page — and an empty pet renders perfectly happily as an egg, which is
+//! exactly the kind of failure nobody notices. Row *shape* is asserted, not just
+//! that the query returned.
+
+use std::path::Path;
+
+use axum::{
+    Router,
+    body::Body,
+    http::{Request, StatusCode},
+};
+use sqlx::SqlitePool;
+use tower::ServiceExt as _;
+use youwin_server::{
+    db::{
+        self,
+        posts::{Cursor, Post, Visibility},
+    },
+    familiar::{Familiar, Stage, cache::TTL_MILLIS},
+    public::{self, assets::Assets},
+};
+
+/// 2026-08-01T00:00:00Z.
+const T0: i64 = 1_785_888_000_000;
+const HOUR: i64 = 3_600_000;
+
+async fn post_at(pool: &SqlitePool, body: &str, hours: i64, visibility: Visibility) -> Post {
+    db::posts::insert(pool, body, None, visibility, T0 + hours * HOUR)
+        .await
+        .expect("insert")
+}
+
+fn app(pool: SqlitePool) -> Router {
+    public::router(
+        pool,
+        // Stands in for the Vite manifest lookup, which needs a real frontend
+        // build on disk and has nothing to do with these routes.
+        Assets {
+            css: "/assets/test.css".to_owned(),
+        },
+        "https://youwin.dev".to_owned(),
+        // Never read: no test here requests /assets.
+        Path::new("web/dist/public"),
+    )
+}
+
+async fn get(app: &Router, uri: &str) -> (StatusCode, String) {
+    let response = app
+        .clone()
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .expect("router");
+
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[sqlx::test]
+async fn all_returns_both_columns_oldest_first(pool: SqlitePool) {
+    post_at(&pool, "second, about a *hike*", 1, Visibility::Public).await;
+    post_at(&pool, "first, about `rust`", 0, Visibility::Public).await;
+
+    let fed = db::familiar::all(&pool).await.expect("query");
+
+    assert_eq!(fed.len(), 2);
+    assert_eq!(fed[0].created_at, T0, "oldest first — compute binary-searches this");
+    assert_eq!(fed[1].created_at, T0 + HOUR);
+
+    // The plaintext projection, not the markdown source and not the HTML: the
+    // keyword tables match against prose, and `*hike*` would not be a hike.
+    assert_eq!(fed[0].body_text, "first, about rust");
+    assert_eq!(fed[1].body_text, "second, about a hike");
+}
+
+#[sqlx::test]
+async fn replies_feed_the_familiar_but_nothing_unpublished_does(pool: SqlitePool) {
+    let root = post_at(&pool, "a public root", 0, Visibility::Public).await;
+
+    // A reply is something that was sat down and written, so it counts.
+    db::posts::insert(&pool, "a public reply", Some(root.id), Visibility::Public, T0 + HOUR)
+        .await
+        .expect("reply");
+
+    // These must not. Counting an unlisted post would let a visitor infer from
+    // the number on the page that one exists, which is the only thing `unlisted`
+    // protects.
+    post_at(&pool, "unlisted", 2, Visibility::Unlisted).await;
+    post_at(&pool, "draft", 3, Visibility::Draft).await;
+
+    let deleted = post_at(&pool, "deleted", 4, Visibility::Public).await;
+    db::posts::soft_delete(&pool, &deleted.public_id, T0 + 5 * HOUR)
+        .await
+        .expect("delete");
+
+    let fed = db::familiar::all(&pool).await.expect("query");
+    let bodies: Vec<_> = fed.iter().map(|post| post.body_text.as_str()).collect();
+    assert_eq!(bodies, ["a public root", "a public reply"]);
+}
+
+#[sqlx::test]
+async fn an_empty_archive_is_an_egg_rather_than_an_error(pool: SqlitePool) {
+    let reading = Familiar::new().read(&pool, T0).await.expect("read");
+
+    assert_eq!(reading.state.stage, Stage::Egg);
+    assert_eq!(reading.vitals.posts, 0);
+    assert_eq!(reading.moods, vec![]);
+}
+
+#[sqlx::test]
+async fn the_snapshot_is_held_for_its_ttl_and_then_catches_up(pool: SqlitePool) {
+    post_at(&pool, "the first note, about rust", 0, Visibility::Public).await;
+
+    let familiar = Familiar::new();
+    let first = familiar.read(&pool, T0).await.expect("read");
+    assert_eq!(first.vitals.posts, 1);
+
+    post_at(&pool, "a second note, about a hike", 0, Visibility::Public).await;
+
+    // Inside the window the snapshot stands, so the new post is not visible yet
+    // — which is the same five minutes the page itself is cached for.
+    let held = familiar.read(&pool, T0 + TTL_MILLIS - 1).await.expect("read");
+    assert_eq!(held.vitals.posts, 1, "the snapshot should still be the first one");
+
+    let caught_up = familiar.read(&pool, T0 + TTL_MILLIS).await.expect("read");
+    assert_eq!(caught_up.vitals.posts, 2);
+}
+
+#[sqlx::test]
+async fn the_feed_carries_the_familiar_on_the_first_page_only(pool: SqlitePool) {
+    for hour in 0..25 {
+        post_at(&pool, "another note about rust and deploys", hour, Visibility::Public).await;
+    }
+
+    let app = app(pool);
+
+    let (status, first_page) = get(&app, "/").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(first_page.contains(r#"href="/familiar""#), "no familiar on the feed");
+
+    // Page two. The pet reads the whole archive and says nothing about the
+    // twenty posts under it, so repeating it down the pagination would be copies
+    // of one fact.
+    let cursor = Cursor {
+        created_at: T0 + 5 * HOUR,
+        id: 5,
+    };
+    let (status, second_page) = get(&app, &format!("/?before={}", cursor.encode())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!second_page.contains(r#"href="/familiar""#), "{second_page}");
+}
+
+#[sqlx::test]
+async fn the_familiar_page_renders_the_pet_and_its_sheet(pool: SqlitePool) {
+    for hour in 0..12 {
+        post_at(&pool, "shipped another rust deploy, no bugs", hour, Visibility::Public).await;
+    }
+
+    let (status, body) = get(&app(pool), "/familiar").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The pet itself, in a <pre> with a description rather than as bare glyphs a
+    // screen reader would spell out.
+    assert!(body.contains("<pre role=\"img\" aria-label=\"The familiar:"), "{body}");
+    assert!(body.contains("hexapod"), "tech posts make a hexapod: {body}");
+
+    // The sheet under it.
+    for expected in ["vitals", "diet", "character sheet", "VIT", "MAG", "█"] {
+        assert!(body.contains(expected), "missing {expected:?} in {body}");
+    }
+
+    assert!(body.contains("<link rel=\"canonical\" href=\"https://youwin.dev/familiar\">"), "{body}");
+}
+
+#[sqlx::test]
+async fn the_familiar_page_stands_up_with_no_posts_at_all(pool: SqlitePool) {
+    let (status, body) = get(&app(pool), "/familiar").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("still an egg"), "{body}");
+    assert!(body.contains("waiting for a first post"), "{body}");
+}

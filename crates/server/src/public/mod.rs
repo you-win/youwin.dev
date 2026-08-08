@@ -8,13 +8,15 @@ pub mod assets;
 pub mod routes;
 pub mod view;
 
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use axum::{Router, routing::get};
 use sqlx::SqlitePool;
 use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use assets::Assets;
+
+use crate::familiar::Familiar;
 
 /// State for the public listener.
 ///
@@ -27,6 +29,11 @@ pub struct PublicState {
     pub assets: Assets,
     /// Absolute origin, for canonical URLs and Atom links.
     pub origin: String,
+    /// The pet's five-minute snapshot. Shared rather than cloned per request —
+    /// the whole point is that it survives between them. It is derived state
+    /// with no schema and no writes, which is what lets it live on this side of
+    /// the boundary at all.
+    pub familiar: Arc<Familiar>,
 }
 
 pub fn router(read: SqlitePool, assets: Assets, origin: String, dist: &Path) -> Router {
@@ -38,6 +45,7 @@ pub fn router(read: SqlitePool, assets: Assets, origin: String, dist: &Path) -> 
         .route("/t/{tag}", get(routes::tag_page))
         .route("/tags", get(routes::tag_index))
         .route("/about", get(routes::about))
+        .route("/familiar", get(routes::familiar))
         .route("/feed.xml", get(routes::feed_xml))
         .route("/health", get(routes::health))
         // In production Caddy's `handle /assets/*` block matches first, so this
@@ -54,5 +62,6 @@ pub fn router(read: SqlitePool, assets: Assets, origin: String, dist: &Path) -> 
             read,
             assets,
             origin,
+            familiar: Arc::new(Familiar::new()),
         })
 }

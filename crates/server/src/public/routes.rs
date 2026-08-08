@@ -9,6 +9,7 @@ use maud::Markup;
 use serde::Deserialize;
 
 use crate::{
+    clock::now_millis,
     db::{
         posts::{self, Cursor},
         search, tags,
@@ -56,13 +57,28 @@ pub async fn feed(
     let is_first_page = cursor == Cursor::START;
     let (rows, older) = posts::feed_page(&state.read, cursor, PAGE_SIZE).await?;
 
+    // Only the first page pays for it, and only on a cache miss — see
+    // `familiar::cache`.
+    let familiar = if is_first_page {
+        Some(state.familiar.read(&state.read, now_millis()).await?)
+    } else {
+        None
+    };
+
     Ok(pages::feed(
         &state.assets,
         &state.origin,
         &rows,
         older,
         is_first_page,
+        familiar.as_ref(),
     ))
+}
+
+/// The familiar's own page.
+pub async fn familiar(State(state): State<PublicState>) -> Result<Markup, AppError> {
+    let reading = state.familiar.read(&state.read, now_millis()).await?;
+    Ok(pages::familiar(&state.assets, &state.origin, &reading))
 }
 
 pub async fn permalink(

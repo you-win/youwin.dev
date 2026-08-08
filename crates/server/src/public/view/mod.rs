@@ -10,6 +10,7 @@
 //! sanitization happens at write time and is tested.
 
 pub mod atom;
+pub mod familiar;
 pub mod layout;
 pub mod pages;
 pub mod post;

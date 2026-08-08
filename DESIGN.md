@@ -86,13 +86,21 @@ youwin.dev/
 │     ├─ cache.rs             # Cloudflare purge-on-write, off unless configured  (M5)
 │     ├─ tag.rs               # canonical form + href — shared by render, db, view (M5)
 │     ├─ url.rs               # percent-encoding for tag paths and ?q=            (M5)
-│     ├─ db/{mod,posts,sessions,search,tags}.rs   # pools + every statement
+│     ├─ db/{mod,posts,sessions,search,tags,familiar}.rs  # pools + every statement
 │     ├─ auth/{mod,password,session,middleware,ratelimit}.rs
+│     ├─ familiar/            # the pet — pure state machine, no schema         (M6)
+│     │  ├─ mod.rs            # the five dimensions + compute()
+│     │  ├─ topics.rs         # keyword taxonomy → topic blend
+│     │  ├─ mood.rs           # mood hashtags + keyword inference
+│     │  ├─ energy.rs         # decay, bursts, learned circadian phase
+│     │  ├─ render.rs         # state → kaomoji, compositionally
+│     │  ├─ stats.rs          # vitals + the character sheet
+│     │  └─ cache.rs          # the five-minute snapshot, and its fast-forward
 │     ├─ public/              # youwin.dev :8080
 │     │  ├─ mod.rs            # Router — read pool only
 │     │  ├─ assets.rs         # Vite manifest → hashed stylesheet URL, read at boot
 │     │  ├─ routes.rs
-│     │  └─ view/             # maud: layout, pages, post, atom, time_fmt
+│     │  └─ view/             # maud: layout, pages, post, atom, time_fmt, familiar
 │     ├─ write/               # write.youwin.dev :8081
 │     │  ├─ mod.rs            # Router — read + write pools
 │     │  └─ routes/{auth,posts,preview}.rs
@@ -344,6 +352,7 @@ GET  /search?q=           full-text search                                (M5)
 GET  /t/:tag              everything carrying one hashtag                 (M5)
 GET  /tags                every tag in use, most-used first               (M5)
 GET  /about
+GET  /familiar            the pet, at full size, with its character sheet      (M6)
 GET  /feed.xml            Atom, public roots
 ```
 
@@ -439,6 +448,71 @@ The call is spawned and never awaited: the write has already committed, so no ou
 should turn a successful post into an error. A failure is logged and the TTL takes over.
 The cost of all this is `reqwest` + `rustls` — about 28 crates on a binary that otherwise
 makes no outbound connections, which is the honest reason this stayed optional for so long.
+
+## The Familiar (M6)
+
+A kaomoji that reads the archive's temperature. It sits above the feed on page one and has
+its own page at `/familiar`. `familiar-design.md` is the specification; this is what the
+implementation does differently and why.
+
+**It has no schema and writes nothing.** Every field is a pure function of
+`(posts, previous state, now)`, so it lives happily on the public listener behind the read
+pool. There is no pet table, no migration, and no state to get out of sync with the posts —
+delete a post and the pet forgets it on the next recompute.
+
+**Five dimensions.** Form comes from the dominant topic over a 50-post window, stage from
+total posts, mood from the most recent post that expressed one, energy from decay since the
+last post plus bursts, and phase from this hour judged against the hours the archive is
+actually written in. Rendering is compositional — eyes, mouth, crown and base are
+independent lookups — so a new mood costs five table entries rather than a new drawing for
+every combination it could appear in.
+
+**The phase modifier is applied at render time, never stored.** This is the one substantive
+correction to the prototype. Energy is recomputed on every cache miss, so a modifier folded
+into the stored value compounds once per page load: a pet in its peak hours gains 0.10 per
+visit and can be walked to hyper by holding down F5, and one visited through the night is
+driven to the floor by traffic rather than by silence. `base_energy` carries decay and
+bursts; `energy` is that plus the offset, computed fresh and discarded.
+
+**The cadence factor runs the other way from the prototype's.** A burst of three posts means
+more from someone who manages one a day than from someone who writes hourly. The prototype's
+`6 / cadence` rewards the fast writer, against the stated intent in both its own docstring
+and the design's energy section.
+
+**Topic keywords match at word boundaries.** Bare substring matching fires `fn` on "often",
+`xp` on "experience" and `ecs` on "specs" — collisions that are invisible until the pet is
+inexplicably a biped. Matching the start of a word keeps plurals and simple inflections
+without a stemmer.
+
+**Mood tags are hashtags.** `#tired` at the end of a post is the explicit signal the design
+asks for, and it needs no new syntax: the tag pass already ran, the tag is in `body_text`,
+and the post is indexed under it like any other. Keyword inference is the fallback.
+
+**It feeds on public posts only, replies included.** A reply is something that was sat down
+and written. An unlisted post is not counted — the post count renders on a public page, and
+including them would let a visitor infer that unlisted posts exist and roughly when, which
+is the one thing `unlisted` protects.
+
+**One five-minute snapshot, fast-forwarded.** Held in memory on `PublicState`, matched to the
+`s-maxage=300` the pages are served with. The useful consequence is that the pet reflects the
+gap between the *last visit* and the *last post*: through a quiet week nothing runs at all,
+and the next visitor triggers one catch-up and sees a pet that has plainly been alone. Two
+concurrent misses both recompute rather than queueing behind a lock held across a query;
+the snapshot refuses to move backwards, so the later one wins.
+
+**No ASCII box.** The design draws the stats in a 47-character frame. The kaomoji keeps its
+`<pre>` — that is genuinely fixed-width art — but the frame does not reflow, and on a phone
+it means either a horizontal scrollbar or a broken picture. The bars stay, because they are
+the texture that makes it read as a terminal pet; the frame is the site's own card, which
+already knows how to be narrow. The picture is centred with CSS rather than padded by
+character count, which would be wrong anyway: half these glyphs are East Asian Ambiguous
+and render at a width the server cannot know.
+
+**Hours and days are UTC**, like every other timestamp here. Phase learning is relative to
+the archive's own histogram, so it self-calibrates and the absolute hours stop mattering
+once there is a fortnight of data — before that a default schedule is blended in, weighted
+by how much history exists, so there is no threshold at which the pet's sense of time
+lurches.
 
 ## Authoring API — `write.youwin.dev`
 
@@ -916,6 +990,7 @@ simply finishes.
 | **M3** | Authoring app | ✅ **Done.** Solid SPA — composer with optimistic insert, inline edit, create/edit/soft-delete, drafts, replies, `/preview/:id` through the public templates. 81 tests green |
 | **M4** | PWA | ✅ **Done.** Generated icons, manifest, service worker, offline feed, update prompt, install prompt, share sheet. Offline verified against `pnpm run preview` with every server stopped |
 | **M5** | Polish | ✅ **Done.** FTS5 search on both surfaces, hashtags with `/t/:tag` and `/tags`, `export`, `backup` + nightly timer, `rerender`, Cloudflare purge-on-write (off unless configured). 114 tests green |
+| **M6** | The Familiar | ✅ **Done.** The whole state machine — topics, mood, energy decay and bursts, learned circadian phase, growth stages, pose triggers — plus compositional kaomoji rendering, the character sheet, and the five-minute snapshot. On the feed and at `/familiar`. 178 tests green |
 
 The split changes the shape of the plan more than anything else: **M1 ships a complete,
 finished artifact** — a public archive at `youwin.dev` that works and is done — rather

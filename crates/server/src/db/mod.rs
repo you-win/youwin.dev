@@ -1,3 +1,4 @@
+pub mod familiar;
 pub mod posts;
 pub mod search;
 pub mod sessions;

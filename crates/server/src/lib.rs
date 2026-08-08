@@ -19,6 +19,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod export;
+pub mod familiar;
 pub mod public;
 pub mod render;
 pub mod seed;
