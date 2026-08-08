@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde_json::json;
@@ -12,14 +12,20 @@ use serde_json::json;
 /// Server-side causes are logged and never serialized — the public listener is
 /// on the open internet, and a leaked SQL string is a free schema disclosure.
 #[derive(Debug, thiserror::Error)]
-// NotFound is constructed from M1 (permalinks), Unauthorized from M2 (auth).
-#[allow(dead_code)]
 pub enum AppError {
     #[error("not found")]
     NotFound,
 
     #[error("unauthorized")]
     Unauthorized,
+
+    #[error("forbidden")]
+    Forbidden,
+
+    /// Login throttling. Carries the seconds until the next attempt is allowed,
+    /// which the client echoes as `Retry-After`.
+    #[error("too many attempts")]
+    TooManyAttempts(i64),
 
     #[error(transparent)]
     Database(#[from] sqlx::Error),
@@ -33,6 +39,12 @@ impl AppError {
                 StatusCode::UNAUTHORIZED,
                 "unauthorized",
                 "Authentication required.",
+            ),
+            Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden", "Refused."),
+            Self::TooManyAttempts(_) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "too_many_attempts",
+                "Too many attempts. Try again later.",
             ),
             Self::Database(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -51,10 +63,13 @@ impl IntoResponse for AppError {
             tracing::error!(error = ?self, "request failed");
         }
 
-        (
-            status,
-            Json(json!({ "error": { "code": code, "message": message } })),
-        )
-            .into_response()
+        let body = Json(json!({ "error": { "code": code, "message": message } }));
+
+        match self {
+            Self::TooManyAttempts(seconds) => {
+                (status, [(header::RETRY_AFTER, seconds.to_string())], body).into_response()
+            }
+            _ => (status, body).into_response(),
+        }
     }
 }

@@ -11,6 +11,8 @@
 //! This crate is a library so integration tests can reach the modules directly.
 //! `main.rs` is a thin binary over it.
 
+pub mod auth;
+pub mod clock;
 pub mod config;
 pub mod db;
 pub mod error;

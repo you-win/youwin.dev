@@ -8,13 +8,17 @@ publish.workspace = true
 [dependencies]
 ammonia = "4.1.4"
 anyhow = "1.0.104"
+argon2 = "0.5.3"
 axum = "0.8.9"
+axum-extra = { version = "0.12.6", features = ["cookie"] }
 base64 = "0.23.1"
 maud = { version = "0.27.0", features = ["axum"] }
 pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 rand = "0.10.2"
+rpassword = "7.5.4"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+sha2 = "0.11.0"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 thiserror = "2.0.20"
 time = { version = "0.3.55", features = ["formatting", "macros"] }
@@ -24,4 +28,6 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [dev-dependencies]
+http-body-util = "0.1.4"
 tempfile = "3.27.0"
+tower = { version = "0.5.3", features = ["util"] }

@@ -375,8 +375,16 @@ not for users.
 
 **Login.** `argon2id` verify against `YOUWIN_PASSWORD_HASH` (a PHC string in the
 environment — never a plaintext password, never in the repo). OWASP baseline params:
-m=19456 KiB, t=2, p=1. A `youwin-server hash-password` subcommand generates the hash so
-the plaintext never has to leave the terminal.
+m=19456 KiB, t=2, p=1. `youwin-server hash-password` generates it, reading the terminal
+without echoing and never taking the password as an argument, which would put it in `ps`
+output and shell history. Serving without a valid hash is a startup failure, not a login
+that can never succeed.
+
+When stdin is a pipe it reads lines instead, so provisioning can be scripted — and it
+**strips a leading byte-order mark**, because PowerShell prepends one when piping to a
+native command. Hashing `U+FEFF` + the password yields a credential that cannot be typed,
+and the resulting failure is invisible in every tool you would reach for. A BOM at the
+start of a password is never intentional.
 
 **Session.** 32 bytes from `OsRng`, base64url-encoded → the cookie value. `SHA-256` of
 that value is the primary key in `sessions`. 90-day expiry, refreshed lazily: if
@@ -389,10 +397,19 @@ bound to that exact host and **cannot** be sent to `youwin.dev`. The public site
 therefore anonymous by construction: "did a draft leak because a cookie was present?" is
 not a reachable bug, and it's also what makes the public surface edge-cacheable.
 
+**The guard is structural.** Every authenticated route lives in a sub-router carrying
+`require_session` as a `route_layer`; login and health are the only two outside it.
+Adding a route means adding it to that sub-router — there is no per-handler annotation
+to forget, and forgetting one cannot leave a route open. `route_layer` rather than
+`layer` so it runs only on *matched* routes: an unknown path 404s instead of 401ing and
+confirming which routes exist.
+
 **CSRF** needs no token. Every state-changing route is `POST`/`PATCH`/`DELETE`, and
 `SameSite=Lax` withholds the cookie from cross-site requests on those methods. As
 defense in depth, a middleware rejects non-`GET` requests whose `Origin` isn't
-`https://write.youwin.dev`.
+`https://write.youwin.dev`. A *missing* `Origin` is allowed: browsers always send it on
+cross-origin writes, so its absence means a non-browser client carrying no ambient cookie
+to abuse — rejecting it would break `curl` for no security gain.
 
 **Brute force.** In-process per-IP limiter: 5 failures → 15-minute lockout, exponential
 after. Single process, so a `Mutex<HashMap>` is the whole implementation. The login
@@ -653,7 +670,7 @@ policy, since it survives SQLite itself.
 |---|---|---|
 | **M0** | Skeleton | ✅ **Done.** Zola tree deleted. Workspace, config, the two pools, `sqlx::migrate!()` on boot (schema landed here — `migrate!()` wants a real migration), two listeners with health checks, `tests/pools.rs`. `theme.css` split into `public.css` + `app.css` |
 | **M1** | **The entire public site** | ✅ **Done.** `youwin-server seed`, maud templates, feed + cursor pagination, permalinks, threads, Atom, markdown pipeline, asset-manifest lookup, themed 404. 26 tests green, covering every statement in `db/`. *Still to do before it is actually live: put the Caddy block and the Cloudflare cache rule on the box, alongside M2.* |
-| **M2** | Auth | `hash-password`, login, sessions, guard middleware, rate limiter, Origin check, the `write.youwin.dev` Caddy block |
+| **M2** | Auth | ✅ **Code done.** `hash-password`, login, sessions, structural guard, throttling, Origin check. 61 tests green. Deploy artifacts written to [`deploy/`](deploy/README.md) — **installing them on the server is still outstanding**, including the Cloudflare cache rule without which M1's caching headers are inert |
 | **M3** | Authoring app | Solid SPA, composer, create/edit/soft-delete, drafts, replies, `/preview/:id` |
 | **M4** | PWA | Manifest, service worker, offline feed, install prompt, share sheet |
 | **M5** | Polish | FTS5 search, hashtags, `export`, backup timer, optional cache purge on write |

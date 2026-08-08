@@ -1,0 +1,111 @@
+# youwin.dev — append to the server's Caddyfile, or import it from there.
+#
+# Follows the house style in grindshell/server-configs/static/Caddyfile:
+# Cloudflare DNS-01, loopback-only backends, two-tier caching, baseline
+# security headers.
+
+# The public archive. No JS, no cookies, no API — so the whole surface is
+# edge-cacheable and the CSP can forbid script outright.
+youwin.dev, www.youwin.dev {
+        tls {
+                dns cloudflare {env.CF_API_TOKEN}
+        }
+
+        encode zstd gzip
+
+        # The one stylesheet, content-hashed by Vite. Served off disk so the app
+        # process never touches CSS bytes. The binary also mounts a ServeDir at
+        # /assets, but this block matches first and therefore always wins; that
+        # fallback exists for `cargo run` in dev.
+        handle /assets/* {
+                root * /var/www/youwin/public
+                header Cache-Control "public, max-age=31536000, immutable"
+                file_server {
+                        precompressed br gzip
+                }
+        }
+
+        handle /favicon.ico /favicon-32x32.png /robots.txt {
+                root * /var/www/youwin/public
+                header Cache-Control "public, max-age=86400"
+                file_server
+        }
+
+        # Everything else is server-rendered HTML. max-age is for the browser,
+        # s-maxage for Cloudflare — which ALSO needs a cache rule in the
+        # dashboard, since CF does not cache HTML by default. Without that rule
+        # this header is inert and every request reaches the origin.
+        #
+        # The cost is that an edit or delete takes up to five minutes to appear.
+        # See DESIGN.md for the purge-on-write alternative.
+        handle {
+                reverse_proxy 127.0.0.1:8080
+                header Cache-Control "public, max-age=60, s-maxage=300"
+        }
+
+        header {
+                X-Content-Type-Options "nosniff"
+                Referrer-Policy "strict-origin-when-cross-origin"
+                X-Frame-Options "SAMEORIGIN"
+                Strict-Transport-Security "max-age=31536000; includeSubDomains"
+                # The strongest policy on the box, and honest: this site ships
+                # zero JavaScript, so 'none' costs nothing to assert.
+                Content-Security-Policy "default-src 'none'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+                -Server
+        }
+}
+
+# The authoring app. The session cookie lives here and ONLY here — its __Host-
+# prefix binds it to this exact host, so youwin.dev can never receive it.
+write.youwin.dev {
+        tls {
+                dns cloudflare {env.CF_API_TOKEN}
+        }
+
+        encode zstd gzip
+
+        # JSON API and the authenticated /preview route (M3). Listed before the
+        # SPA fallback so they win.
+        handle /api/* {
+                reverse_proxy 127.0.0.1:8081
+        }
+        handle /preview/* {
+                reverse_proxy 127.0.0.1:8081
+        }
+
+        # Content-hashed SPA build output.
+        handle /assets/* {
+                root * /var/www/youwin/write
+                header Cache-Control "public, max-age=31536000, immutable"
+                file_server {
+                        precompressed br gzip
+                }
+        }
+
+        # PWA plumbing: on disk, but MUST revalidate. A cached sw.js pins an old
+        # build on every installed device until it expires.
+        handle /sw.js /manifest.webmanifest /icons/* {
+                root * /var/www/youwin/write
+                header Cache-Control "no-cache"
+                file_server
+        }
+
+        # Client-routed SPA: serve the file if it exists, else the shell.
+        handle {
+                root * /var/www/youwin/write
+                try_files {path} /index.html
+                file_server
+                header Cache-Control "no-cache"
+        }
+
+        # Nothing here is ever cached at the edge — it is all authenticated.
+        header {
+                X-Content-Type-Options "nosniff"
+                Referrer-Policy "strict-origin-when-cross-origin"
+                # DENY, not SAMEORIGIN: nothing should ever frame the composer.
+                X-Frame-Options "DENY"
+                Strict-Transport-Security "max-age=31536000; includeSubDomains"
+                Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+                -Server
+        }
+}

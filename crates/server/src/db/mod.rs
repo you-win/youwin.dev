@@ -1,4 +1,5 @@
 pub mod posts;
+pub mod sessions;
 
 use std::time::Duration;
 

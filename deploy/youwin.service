@@ -1,0 +1,59 @@
+# /etc/systemd/system/youwin.service
+#
+# One unit for both listeners: 8080 (public) and 8081 (authoring). The process
+# binds loopback only — Caddy is the sole possible peer, which is what makes
+# trusting CF-Connecting-IP / X-Forwarded-For for rate limiting sound.
+
+[Unit]
+Description=youwin.dev microblog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=youwin
+Group=youwin
+WorkingDirectory=/srv/youwin
+ExecStart=/srv/youwin/bin/youwin-server
+
+Environment=YOUWIN_DB=/var/lib/youwin/youwin.db
+Environment=YOUWIN_PUBLIC_DIST=/var/www/youwin/public
+Environment=YOUWIN_PUBLIC_BIND=127.0.0.1:8080
+Environment=YOUWIN_WRITE_BIND=127.0.0.1:8081
+Environment=YOUWIN_PUBLIC_ORIGIN=https://youwin.dev
+Environment=YOUWIN_WRITE_ORIGIN=https://write.youwin.dev
+Environment=YOUWIN_COOKIE_SECURE=true
+Environment=RUST_LOG=youwin_server=info,tower_http=warn
+
+# Holds YOUWIN_PASSWORD_HASH. Mode 0600, owned by root, NOT in the repo.
+# Generate with: youwin-server hash-password > /etc/youwin/secrets.env
+EnvironmentFile=/etc/youwin/secrets.env
+
+Restart=on-failure
+RestartSec=2
+
+# SIGTERM is handled: both listeners drain and the pools close, so SQLite
+# checkpoints the WAL instead of leaving a hot journal behind.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# Hardening. The process needs exactly one writable path and two loopback
+# sockets; everything else is off.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/youwin
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

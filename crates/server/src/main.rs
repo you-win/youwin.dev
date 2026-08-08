@@ -1,9 +1,12 @@
-use std::future::IntoFuture;
+use std::{
+    future::IntoFuture,
+    io::{IsTerminal as _, Read as _},
+};
 
 use anyhow::{Context as _, Result, bail};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
-use youwin_server::{config, db, public, seed, write};
+use youwin_server::{auth::password, clock::now_millis, config, db, public, seed, write};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -16,22 +19,127 @@ async fn main() -> Result<()> {
 
     let cfg = config::Config::from_env()?;
 
-    // Hand-rolled rather than a CLI crate: there is one subcommand, and adding
-    // an argument parser for it would be more code than the feature.
+    // Hand-rolled rather than a CLI crate: two subcommands, and an argument
+    // parser for them would be more code than the features.
     match std::env::args().nth(1).as_deref() {
         None => serve(cfg).await,
+        Some("hash-password") => hash_password(),
         Some("seed") => {
             let db = db::Db::connect(&cfg).await?;
             let result = seed::run(&db).await;
             db.close().await;
             result
         }
-        Some(other) => bail!("unknown subcommand {other:?}; expected `seed`, or no argument to serve"),
+        Some(other) => bail!(
+            "unknown subcommand {other:?}; expected `seed`, `hash-password`, or no argument to serve"
+        ),
+    }
+}
+
+/// Prints an argon2id PHC string for `YOUWIN_PASSWORD_HASH`.
+///
+/// Never reads argv — an argument would put the plaintext in `ps` output and
+/// shell history. On a terminal it prompts without echoing; when stdin is a pipe
+/// it reads two lines instead, so provisioning can be scripted.
+fn hash_password() -> Result<()> {
+    let (password, confirm) = if std::io::stdin().is_terminal() {
+        (
+            rpassword::prompt_password("New password: ")?,
+            rpassword::prompt_password("Confirm: ")?,
+        )
+    } else {
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input)?;
+        piped_credentials(&input)
+    };
+
+    if password != confirm {
+        bail!("passwords do not match");
+    }
+    if password.chars().count() < 12 {
+        bail!("use at least 12 characters — this is the only credential on the box");
+    }
+
+    // stdout, so `youwin-server hash-password > /etc/youwin/secrets.env` works;
+    // the prompts above go to the tty.
+    println!("YOUWIN_PASSWORD_HASH={}", password::hash(&password)?);
+    Ok(())
+}
+
+/// Splits piped stdin into (password, confirmation).
+///
+/// Strips a leading byte-order mark. PowerShell prepends one when piping to a
+/// native command, and hashing `U+FEFF` + the password produces a credential
+/// that cannot be typed — the resulting login failure gives no clue why, because
+/// the offending character is invisible in every tool you would reach for. A BOM
+/// at the start of a password is never intentional.
+///
+/// A single-line pipe confirms itself: there is no second chance to mistype it.
+fn piped_credentials(input: &str) -> (String, String) {
+    let cleaned = input.strip_prefix('\u{feff}').unwrap_or(input);
+    let mut lines = cleaned.lines();
+
+    let password = lines.next().unwrap_or_default().to_owned();
+    let confirm = lines
+        .next()
+        .filter(|line| !line.is_empty())
+        .map_or_else(|| password.clone(), str::to_owned);
+
+    (password, confirm)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::piped_credentials;
+
+    #[test]
+    fn a_leading_bom_is_stripped() {
+        let (password, confirm) = piped_credentials("\u{feff}hunter2hunter2\r\n");
+        assert_eq!(password, "hunter2hunter2");
+        assert_eq!(confirm, "hunter2hunter2");
+    }
+
+    #[test]
+    fn one_line_confirms_itself_and_two_lines_are_compared() {
+        assert_eq!(piped_credentials("secret\n"), ("secret".into(), "secret".into()));
+        assert_eq!(piped_credentials("secret"), ("secret".into(), "secret".into()));
+        // A trailing blank line is an artifact, not a failed confirmation.
+        assert_eq!(piped_credentials("secret\n\n"), ("secret".into(), "secret".into()));
+
+        let (password, confirm) = piped_credentials("one\ntwo\n");
+        assert_ne!(password, confirm, "a genuine mismatch must still be caught");
+    }
+
+    #[test]
+    fn crlf_line_endings_do_not_become_part_of_the_password() {
+        let (password, confirm) = piped_credentials("secret\r\nsecret\r\n");
+        assert_eq!(password, "secret");
+        assert_eq!(confirm, "secret");
     }
 }
 
 async fn serve(cfg: config::Config) -> Result<()> {
+    // Auth exists as of M2, so this is now a hard requirement rather than an
+    // optional value. Failing here means a misconfigured deploy never starts;
+    // the alternative is a running site whose login can never succeed.
+    let Some(password_hash) = cfg.password_hash.clone() else {
+        bail!(
+            "YOUWIN_PASSWORD_HASH is not set. Generate one with `youwin-server hash-password` \
+             and put it in the unit's EnvironmentFile."
+        );
+    };
+
+    if !password_hash.starts_with("$argon2id$") {
+        bail!("YOUWIN_PASSWORD_HASH is not an argon2id PHC string; regenerate it");
+    }
+
     let db = db::Db::connect(&cfg).await?;
+
+    // Expired rows are already unusable, but nothing else ever removes them.
+    let purged = youwin_server::db::sessions::purge_expired(&db.write, now_millis()).await?;
+    if purged > 0 {
+        tracing::info!(purged, "removed expired sessions");
+    }
 
     // Read once at startup. A missing manifest is fatal on purpose: the public
     // site cannot render without its stylesheet, and failing here says so
@@ -64,8 +172,16 @@ async fn serve(cfg: config::Config) -> Result<()> {
         &cfg.public_dist,
     );
     let public = axum::serve(public_listener, public_router).with_graceful_shutdown(shutdown_signal());
-    let authoring = axum::serve(write_listener, write::router(db.clone()))
-        .with_graceful_shutdown(shutdown_signal());
+    let authoring_router = write::router(
+        db.clone(),
+        write::AuthConfig {
+            password_hash,
+            cookie_secure: cfg.cookie_secure,
+            origin: cfg.write_origin.clone(),
+        },
+    );
+    let authoring =
+        axum::serve(write_listener, authoring_router).with_graceful_shutdown(shutdown_signal());
 
     // Each server gets its own shutdown future. tokio supports multiple
     // concurrent listeners on the same signal, so there is no fan-out channel to
