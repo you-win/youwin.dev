@@ -214,11 +214,19 @@ The workflow is [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml
 
 Things in there that are load-bearing:
 
-- **`runs-on: ubuntu-24.04`, pinned.** The glibc CI builds against becomes the
-  floor for the server. 24.04 is glibc 2.39 and Debian 13 has 2.41, so the
-  binary loads. A server *older* than the runner could not run it — which is
-  what the smoke test below exists to catch. If that ever happens, build in a
-  matching container instead (`container: rust:1-trixie`).
+- **`runs-on: ubuntu-24.04`, pinned, and the glibc floor is asserted.** The
+  server is Debian 13 (glibc 2.41); the binary links only `libc`, `libm` and
+  `libgcc_s` — SQLite is bundled, rustls needs no OpenSSL — and measures out at
+  **GLIBC_2.38**, so it loads with room to spare. `SERVER_GLIBC` in the workflow
+  states 2.41 and a step fails the build if the binary ever needs more than
+  that, before anything is uploaded. Update it only when the server itself is
+  upgraded. If a dependency ever pushes the requirement past the server, build
+  in a matching container instead (`container: rust:1-trixie`).
+
+  Worth knowing: the requirement comes from which symbol versions the functions
+  in use last changed at, **not** from the builder's glibc. Building on 2.39
+  does not by itself demand 2.39 at runtime — this same source measures 2.38
+  whether it is built on Ubuntu 24.04 or Debian 13.
 - **`--locked` on both cargo commands.** The deploy builds exactly what
   `Cargo.lock` says or it fails; quietly resolving a different dependency set
   during a deploy is something you find out about much later.

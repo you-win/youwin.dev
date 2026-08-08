@@ -13,14 +13,15 @@ concurrency:
 
 jobs:
   deploy:
-    # Pinned, not ubuntu-latest, because the glibc this builds against becomes
-    # the floor for the server. 24.04 is glibc 2.39; Debian 13 has 2.41, so the
-    # binary loads there. A server OLDER than the runner would not be able to
-    # run it — `activate-youwin` smoke-tests for exactly that before it stops
-    # anything, so the failure is a red workflow rather than a dead site.
-    # If the server is ever older than the runner, build in a matching container
-    # instead: `container: rust:1-trixie`.
+    # Pinned, not ubuntu-latest: the glibc this builds against sets the floor
+    # for what the server can run, and a runner image bump should not get to
+    # change that silently. 24.04 is glibc 2.39.
     runs-on: ubuntu-24.04
+
+    env:
+      # The server is Debian 13 (trixie), glibc 2.41. Asserted against the
+      # built binary below. Raise this only when the server is upgraded.
+      SERVER_GLIBC: "2.41"
 
     steps:
       - uses: actions/checkout@v5
@@ -80,12 +81,28 @@ jobs:
           YOUWIN_BUILD: ${{ github.sha }}
         run: cargo build --release --locked --package youwin-server
 
-      - name: Report the binary's runtime requirements
+      # The binary links libc, libm and libgcc_s and nothing else — SQLite is
+      # bundled and rustls needs no OpenSSL — so glibc is the only thing tying
+      # this build to a particular server. Asserted rather than reported: a
+      # dependency bump that pulls in a newer symbol should fail here, before
+      # anything is uploaded, rather than at the smoke test after it.
+      #
+      # Note the requirement comes from which symbol versions the used functions
+      # last changed at, NOT from the builder's glibc — building on 2.39 does
+      # not by itself demand 2.39 at runtime.
+      - name: Check the binary can run on the server
         run: |
-          objdump -T target/release/youwin-server \
-            | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -1 \
-            | sed 's/^/needs at most: /'
           ldd target/release/youwin-server
+          needed="$(objdump -T target/release/youwin-server \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -uV | tail -1)"
+          echo "binary needs glibc <= $needed; server has $SERVER_GLIBC"
+
+          highest="$(printf '%s\n%s\n' "$needed" "$SERVER_GLIBC" | sort -V | tail -1)"
+          if [ "$highest" != "$SERVER_GLIBC" ]; then
+            echo "::error::Binary requires glibc $needed but the server has $SERVER_GLIBC."
+            echo "::error::Build in a matching container instead: container: rust:1-trixie"
+            exit 1
+          fi
 
       # ---------------------------------------------------------------- stage
       - name: Assemble the release

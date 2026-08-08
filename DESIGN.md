@@ -820,15 +820,24 @@ no database — so the only thing it can fail on is the dynamic loader. That is 
 worth catching here, because it is the one that would otherwise take the site down *after*
 the old process had already been stopped.
 
-**glibc is the one real coupling.** `sqlx`'s `sqlite` feature bundles SQLite through
-`libsqlite3-sys`, and `reqwest` uses rustls, so the binary links nothing but `libc`, `libm`
-and `libgcc_s` — measured, it needs at most `GLIBC_2.38`. The runner is pinned to
-`ubuntu-24.04` (glibc 2.39) rather than `ubuntu-latest`, because whatever CI builds against
-becomes the floor for the server; Debian 13 is 2.41, so it loads. A server *older* than the
-runner could not run it, which is precisely what the smoke test turns into a red workflow
-instead of an outage. The escape hatch is one line — build in a matching container
-(`container: rust:1-trixie`) — rather than a static musl build, which `aws-lc-sys` in the
-rustls tree makes considerably less pleasant than it sounds.
+**glibc is the one real coupling, and it is asserted rather than assumed.** `sqlx`'s
+`sqlite` feature bundles SQLite through `libsqlite3-sys`, and `reqwest` uses rustls, so the
+binary links nothing but `libc`, `libm` and `libgcc_s` — measured, it needs at most
+`GLIBC_2.38`. The server is **Debian 13, glibc 2.41**; the runner is pinned to
+`ubuntu-24.04` (2.39) rather than `ubuntu-latest`, so a runner image bump cannot quietly
+raise the floor. A workflow step compares the binary's highest required symbol version
+against `SERVER_GLIBC` and fails the build before anything is uploaded.
+
+The margin is not large in the direction that matters: Debian **12** (2.36) would not run
+this binary, so "which Debian" was load-bearing rather than trivia. The escape hatch is one
+line — build in a matching container (`container: rust:1-trixie`) — rather than a static
+musl build, which `aws-lc-sys` in the rustls tree makes considerably less pleasant than it
+sounds.
+
+A subtlety worth recording, because it is easy to reason about backwards: the requirement
+comes from which symbol versions the *used functions* last changed ABI at, not from the
+builder's glibc. Building on a newer system does not by itself raise the runtime floor —
+this source measures 2.38 whether built on Ubuntu 24.04 or Debian 13.
 
 **What is deliberately not automated:** first-time provisioning (root, one-time), the
 password hash (the site's only credential — it must not exist in a CI secret), DNS and the

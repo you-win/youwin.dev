@@ -26,6 +26,12 @@ KEEP="${KEEP_RELEASES:-5}"
 log() { printf '==> %s\n' "$*"; }
 die() { printf 'activate-youwin: %s\n' "$*" >&2; exit 1; }
 
+# curl is what proves the site came back. Without it every health check fails,
+# which would look exactly like a broken release and trigger a rollback that
+# fixes nothing. Debian ships a minimal base; check rather than assume.
+command -v curl >/dev/null 2>&1 \
+  || die "curl is required for the health check (apt install curl)"
+
 # ---------------------------------------------------------------------------
 # Resolve the target
 # ---------------------------------------------------------------------------
