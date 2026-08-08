@@ -69,7 +69,15 @@ pub fn render(assets: &Assets, page: &Page<'_>, content: Markup) -> Markup {
                 meta name="twitter:card" content="summary";
 
                 link rel="stylesheet" href=(assets.css);
-                link rel="icon" href="/favicon.ico";
+
+                // The .ico carries 16/32/48 and is what a browser guesses at
+                // when told nothing; the PNGs are listed so one that would
+                // rather have a PNG does not have to unpack an icon container
+                // to get it. All three come out of web/scripts/generate-icons.mjs,
+                // from the same scene as the app icons.
+                link rel="icon" href="/favicon.ico" sizes="any";
+                link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png";
+                link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png";
                 link rel="alternate" type="application/atom+xml" title="youwin.dev" href="/feed.xml";
             }
             body class="min-h-dvh" {
@@ -110,6 +118,75 @@ pub fn render(assets: &Assets, page: &Page<'_>, content: Markup) -> Markup {
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+
+    /// Every icon the shell links, as a root-absolute path.
+    ///
+    /// An icon has to be true in three places at once: linked here, present in
+    /// the repo's `static/` (which CI copies into the release), and listed in the
+    /// Caddyfile's `@root_files`, since Caddy serves those by an explicit set of
+    /// paths rather than from a directory. Nothing at runtime connects the three,
+    /// and an icon missing from any one of them fails the same silent way — the
+    /// tab just shows the browser's default and nobody files a bug for months.
+    const LINKED_ICONS: [&str; 3] = ["/favicon.ico", "/favicon-32x32.png", "/favicon-16x16.png"];
+
+    fn repo_root() -> PathBuf {
+        // CARGO_MANIFEST_DIR is crates/server.
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+    }
+
+    fn shell() -> String {
+        let assets = Assets {
+            css: "/assets/test.css".to_owned(),
+        };
+        let page = Page::new("t", "d", "https://youwin.dev/".to_owned());
+        render(&assets, &page, html! {}).into_string()
+    }
+
+    #[test]
+    fn the_shell_links_every_icon() {
+        let html = shell();
+        for icon in LINKED_ICONS {
+            assert!(
+                html.contains(&format!(r#"href="{icon}""#)),
+                "{icon} is not linked in the document head:\n{html}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_linked_icon_ships_and_is_served() {
+        let root = repo_root();
+
+        let caddyfile = std::fs::read_to_string(root.join("deploy/youwin.dev.caddy"))
+            .expect("reading deploy/youwin.dev.caddy");
+        let root_files = caddyfile
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("@root_files "))
+            .expect("the Caddyfile should still declare a @root_files matcher");
+
+        for icon in LINKED_ICONS {
+            let on_disk = root.join("static").join(icon.trim_start_matches('/'));
+            assert!(
+                on_disk.is_file(),
+                "{icon} is linked but {} does not exist. \
+                 Run `pnpm --dir web run icons`.",
+                on_disk.display()
+            );
+            assert!(
+                root_files.split_whitespace().any(|path| path == icon),
+                "{icon} is linked but Caddy will not serve it — add it to \
+                 @root_files, which currently reads:\n  {root_files}"
+            );
         }
     }
 }

@@ -1,5 +1,6 @@
 /**
- * Generates the PWA icons from the mistwood palette.
+ * Generates the PWA icons and the public site's favicons from the mistwood
+ * palette.
  *
  * Run with `pnpm run icons`. Output is committed, so this only needs re-running
  * when the theme changes — which is the point of having it in the repo rather
@@ -7,7 +8,7 @@
  *
  * No image dependency: the scene is a pure function of (x, y), sampled 4×4 per
  * output pixel for anti-aliasing, then encoded as PNG with node:zlib. A canvas
- * or rasteriser library would be a lot of install for four flat images.
+ * or rasteriser library would be a lot of install for a handful of flat images.
  */
 
 import { deflateSync } from "node:zlib";
@@ -15,7 +16,17 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const OUT_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "public", "icons");
+const HERE = dirname(fileURLToPath(import.meta.url));
+
+/** PWA icons, served off write.youwin.dev. */
+const OUT_DIR = join(HERE, "..", "public", "icons");
+
+/**
+ * Favicons for the public site. These sit in the repo's `static/`, which CI
+ * copies over the public build output — they are not Vite inputs, so they do
+ * not belong under `web/public/`.
+ */
+const STATIC_DIR = join(HERE, "..", "..", "static");
 
 // sRGB conversions of the theme's OKLCH tokens (web/src/theme.css). Hardcoded
 // rather than converted at runtime — these are the same four colours the CSS
@@ -168,6 +179,44 @@ function encodePng(size, pixels) {
   ]);
 }
 
+/**
+ * An .ico wrapping PNG payloads.
+ *
+ * The BMP form an .ico traditionally carries wants a bottom-up pixel array and a
+ * separate 1-bit AND mask for transparency. The PNG form needs neither, and
+ * every browser has understood it since IE11 — so with `encodePng` already
+ * written this is a 6-byte header plus one 16-byte directory entry per size.
+ */
+function encodeIco(images) {
+  const HEADER = 6;
+  const ENTRY = 16;
+
+  const header = Buffer.alloc(HEADER);
+  header.writeUInt16LE(0, 0); // reserved
+  header.writeUInt16LE(1, 2); // 1 = icon, 2 = cursor
+  header.writeUInt16LE(images.length, 4);
+
+  const directory = Buffer.alloc(ENTRY * images.length);
+  let offset = HEADER + directory.length;
+
+  images.forEach(({ size, png }, index) => {
+    const at = index * ENTRY;
+    // Width and height are one byte each, so 256 is encoded as 0. Nothing here
+    // is that big, but the field is the reason no .ico can exceed it.
+    directory[at] = size === 256 ? 0 : size;
+    directory[at + 1] = size === 256 ? 0 : size;
+    directory[at + 2] = 0; // palette size; 0 for truecolour
+    directory[at + 3] = 0; // reserved
+    directory.writeUInt16LE(1, at + 4); // colour planes
+    directory.writeUInt16LE(32, at + 6); // bits per pixel
+    directory.writeUInt32LE(png.length, at + 8);
+    directory.writeUInt32LE(offset, at + 12);
+    offset += png.length;
+  });
+
+  return Buffer.concat([header, directory, ...images.map((image) => image.png)]);
+}
+
 const ICONS = [
   { name: "icon-192.png", size: 192, scale: 1 },
   { name: "icon-512.png", size: 512, scale: 1 },
@@ -177,10 +226,46 @@ const ICONS = [
   { name: "apple-touch-icon.png", size: 180, scale: 1 },
 ];
 
+/**
+ * A favicon is read at 16px in a tab strip. The PWA framing leaves air around
+ * the trees, and at 16px that air is most of the image — so the favicon crops
+ * in until the foliage fills the frame. Same scene and same palette as the app
+ * icon; just standing closer to it.
+ */
+const FAVICON_SCALE = 1.5;
+
+/**
+ * 16 and 32 are what browsers ask for; 48 is what Windows uses for a pinned
+ * site, and it is 2 kB.
+ */
+const FAVICON_SIZES = [16, 32, 48];
+
 mkdirSync(OUT_DIR, { recursive: true });
 
 for (const { name, size, scale } of ICONS) {
   const png = encodePng(size, render(size, scale));
   writeFileSync(join(OUT_DIR, name), png);
+  console.log(`${name}  ${size}×${size}  ${(png.length / 1024).toFixed(1)} kB`);
+}
+
+mkdirSync(STATIC_DIR, { recursive: true });
+
+const favicons = FAVICON_SIZES.map((size) => ({
+  size,
+  png: encodePng(size, render(size, FAVICON_SCALE)),
+}));
+
+const ico = encodeIco(favicons);
+writeFileSync(join(STATIC_DIR, "favicon.ico"), ico);
+console.log(
+  `favicon.ico  ${FAVICON_SIZES.join("/")}  ${(ico.length / 1024).toFixed(1)} kB`,
+);
+
+// Linked alongside the .ico so a browser that would rather have a PNG does not
+// have to unpack one out of an icon container to get it.
+for (const { size, png } of favicons) {
+  if (size === 48) continue; // .ico only — nothing in the HTML asks for 48.
+  const name = `favicon-${size}x${size}.png`;
+  writeFileSync(join(STATIC_DIR, name), png);
   console.log(`${name}  ${size}×${size}  ${(png.length / 1024).toFixed(1)} kB`);
 }

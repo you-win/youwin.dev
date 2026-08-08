@@ -36,7 +36,7 @@ youwin.dev, www.youwin.dev {
 	# has to be bound to a matcher first — otherwise `caddy validate` fails
 	# with "wrong argument count" and the whole config is rejected, every
 	# site on the box included.
-	@root_files path /favicon.ico /favicon-32x32.png /robots.txt
+	@root_files path /favicon.ico /favicon-32x32.png /favicon-16x16.png /robots.txt
 	handle @root_files {
 		root * /srv/sites/youwin.dev/current/public
 		header Cache-Control "public, max-age=86400"
