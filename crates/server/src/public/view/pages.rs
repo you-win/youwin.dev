@@ -289,8 +289,11 @@ pub fn permalink(
 
     let content = html! {
         div class="flex flex-col gap-3" {
-            @for item in thread {
-                (post::thread_item(item, item.id == focused.id))
+            // Depth-first, so a reply sits under what it answered. The rows come
+            // out of the database oldest-first; `nest` is what turns that into a
+            // shape rather than a list.
+            @for placed in crate::thread::nest(thread) {
+                (post::thread_item(placed.post, placed.post.id == focused.id, placed.depth))
             }
         }
 

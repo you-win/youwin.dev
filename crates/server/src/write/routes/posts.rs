@@ -63,6 +63,18 @@ impl From<&AuthoredRow> for PostDto {
     }
 }
 
+/// A post inside a thread: the post, plus where it sits in the reply tree.
+///
+/// `depth` is computed here rather than in the client so the composer and the
+/// public archive cannot disagree about the shape of a thread — including the
+/// awkward case, a reply whose parent was deleted. See [`crate::thread`].
+#[derive(Debug, Serialize)]
+pub struct ThreadItemDto {
+    #[serde(flatten)]
+    post: PostDto,
+    depth: usize,
+}
+
 #[derive(Debug, Serialize)]
 pub struct FeedDto {
     posts: Vec<PostDto>,
@@ -204,9 +216,17 @@ pub async fn show(
 
     let thread = posts::authored_thread(&state.db.read, focused.post.root_id).await?;
 
+    let nested: Vec<ThreadItemDto> = crate::thread::nest(&thread)
+        .into_iter()
+        .map(|placed| ThreadItemDto {
+            post: PostDto::from(placed.post),
+            depth: placed.depth,
+        })
+        .collect();
+
     Ok(Json(json!({
         "post": PostDto::from(&focused),
-        "thread": thread.iter().map(PostDto::from).collect::<Vec<_>>(),
+        "thread": nested,
     })))
 }
 

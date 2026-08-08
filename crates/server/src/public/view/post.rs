@@ -95,11 +95,39 @@ pub fn search_item(hit: &search::Hit) -> Markup {
     }
 }
 
+/// How far the indent goes before it stops.
+///
+/// The column is `max-w-2xl` and most of the reading happens on a phone. Past
+/// four levels the indent costs more width than the nesting is worth, so deeper
+/// replies keep their place in the order and stop moving right. `thread::nest`
+/// reports the true depth; this is the only thing that clamps it.
+const MAX_INDENT: usize = 4;
+
+/// The gutter for one nesting level.
+///
+/// Tailwind scans the source for class names and cannot see one assembled from
+/// a number at runtime, so every step is written out. Tighter on a phone than
+/// from `sm` up, because that is where the width actually runs out.
+fn indent(depth: usize) -> &'static str {
+    match depth.min(MAX_INDENT) {
+        0 => "",
+        1 => "ml-3 border-l border-base-300 pl-2 sm:ml-4 sm:pl-3",
+        2 => "ml-6 border-l border-base-300 pl-2 sm:ml-8 sm:pl-3",
+        3 => "ml-9 border-l border-base-300 pl-2 sm:ml-12 sm:pl-3",
+        _ => "ml-12 border-l border-base-300 pl-2 sm:ml-16 sm:pl-3",
+    }
+}
+
 /// One post inside a thread on a permalink page.
 ///
 /// `focused` marks the post whose permalink this is — when you follow a link to
 /// a reply, the whole thread renders and this is what tells you where you landed.
-pub fn thread_item(post: &Post, focused: bool) -> Markup {
+///
+/// `depth` is how far under the root it hangs, from `thread::nest`. A reply is
+/// indented under what it answered rather than appended to the end of the
+/// thread, which is the only thing that distinguishes "answered the third post"
+/// from "answered last".
+pub fn thread_item(post: &Post, focused: bool, depth: usize) -> Markup {
     let classes = if focused {
         "rounded-box border border-primary/40 bg-base-200 p-4"
     } else {
@@ -107,13 +135,15 @@ pub fn thread_item(post: &Post, focused: bool) -> Markup {
     };
 
     html! {
-        article class=(classes) id=(format!("p-{}", post.public_id)) {
-            div class="mb-2 text-sm text-secondary" {
-                a href=(format!("/p/{}", post.public_id)) class="no-underline hover:underline" {
-                    (timestamp(post, true))
+        div class=(indent(depth)) {
+            article class=(classes) id=(format!("p-{}", post.public_id)) {
+                div class="mb-2 text-sm text-secondary" {
+                    a href=(format!("/p/{}", post.public_id)) class="no-underline hover:underline" {
+                        (timestamp(post, true))
+                    }
                 }
+                (body(post))
             }
-            (body(post))
         }
     }
 }

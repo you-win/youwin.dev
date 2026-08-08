@@ -25,5 +25,6 @@ pub mod public;
 pub mod render;
 pub mod seed;
 pub mod tag;
+pub mod thread;
 pub mod url;
 pub mod write;

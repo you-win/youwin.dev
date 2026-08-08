@@ -2,7 +2,7 @@
 
 mod common;
 
-use axum::http::StatusCode;
+use axum::{Router, http::StatusCode};
 use common::{
     create_post, create_reply, empty_request, get, json_request, json_str, login, send, PASSWORD,
 };
@@ -133,6 +133,80 @@ async fn replies_chain_onto_the_parent_thread(pool: SqlitePool) {
     assert_eq!(thread, vec![root.as_str(), first.as_str(), second.as_str()]);
     assert_eq!(payload["post"]["id"], second.as_str());
     assert_eq!(payload["post"]["is_reply"], true);
+}
+
+/// `(id, depth)` for each post in a thread, in the order the API returned them.
+async fn thread_shape(app: &Router, cookie: &str, id: &str) -> Vec<(String, u64)> {
+    let reply = send(app, get(&format!("/api/posts/{id}"), Some(cookie))).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+
+    reply.json()["thread"]
+        .as_array()
+        .expect("thread is an array")
+        .iter()
+        .map(|post| {
+            (
+                post["id"].as_str().expect("id").to_owned(),
+                post["depth"].as_u64().expect("every thread row carries a depth"),
+            )
+        })
+        .collect()
+}
+
+#[sqlx::test]
+async fn the_thread_carries_the_depth_of_each_reply(pool: SqlitePool) {
+    let app = common::app(pool);
+    let cookie = login(&app).await;
+
+    let root = create_post(&app, &cookie, "root", "public").await;
+    let first = create_reply(&app, &cookie, &root, "first").await;
+    let second = create_reply(&app, &cookie, &root, "second").await;
+    // Answers `first`, but is written after `second`. Flat, it landed last with
+    // nothing saying what it replied to.
+    let late = create_reply(&app, &cookie, &first, "answering the first").await;
+
+    // The composer indents from `depth` rather than working the tree out from
+    // parent ids, so this is the whole contract between the two.
+    assert_eq!(
+        thread_shape(&app, &cookie, &root).await,
+        vec![
+            (root.clone(), 0),
+            (first.clone(), 1),
+            (late.clone(), 2),
+            (second.clone(), 1),
+        ]
+    );
+
+    // Same thread whichever post in it you asked for.
+    assert_eq!(
+        thread_shape(&app, &cookie, &late).await,
+        thread_shape(&app, &cookie, &root).await
+    );
+}
+
+#[sqlx::test]
+async fn a_reply_outlives_the_deletion_of_the_post_it_answered(pool: SqlitePool) {
+    let app = common::app(pool);
+    let cookie = login(&app).await;
+
+    let root = create_post(&app, &cookie, "root", "public").await;
+    let doomed = create_reply(&app, &cookie, &root, "this one goes away").await;
+    let orphan = create_reply(&app, &cookie, &doomed, "answering the doomed one").await;
+
+    let reply = send(
+        &app,
+        empty_request("DELETE", &format!("/api/posts/{doomed}"), Some(&cookie)),
+    )
+    .await;
+    // One row: only a *root* takes its replies with it.
+    assert_eq!(reply.json()["deleted"], 1);
+
+    // The orphan is still in the thread, back at the top level — dropping it
+    // would lose a post that is perfectly readable and still has a permalink.
+    assert_eq!(
+        thread_shape(&app, &cookie, &root).await,
+        vec![(root.clone(), 0), (orphan.clone(), 0)]
+    );
 }
 
 #[sqlx::test]

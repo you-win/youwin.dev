@@ -55,9 +55,21 @@ export interface Page {
   next: string | null;
 }
 
+/**
+ * A post inside a thread, with how far under the root it hangs.
+ *
+ * `depth` is computed server-side (crates/server/src/thread.rs) rather than
+ * derived here from parent ids, so this view and youwin.dev cannot disagree
+ * about the shape of a thread — including the case that would be easiest to get
+ * differently wrong twice, a reply whose parent has been deleted.
+ */
+export interface ThreadItem extends Post {
+  depth: number;
+}
+
 export interface Thread {
   post: Post;
-  thread: Post[];
+  thread: ThreadItem[];
 }
 
 export interface Me {
