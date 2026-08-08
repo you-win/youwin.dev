@@ -1,0 +1,20 @@
+/* The authoring SPA at write.youwin.dev. Tailwind + DaisyUI + the mistwood
+   tokens. This bundle is never served to the public site. */
+
+@import "tailwindcss" source(none);
+@import "./theme.css";
+
+/* Scoped to the SPA sources so this bundle doesn't pick up classes that only
+   exist in the maud templates. */
+@source "./**/*.{ts,tsx}";
+@source "../index.html";
+
+/* themes: false ships none of DaisyUI's ~30 built-in themes — they would bloat
+   the stylesheet and let a stray `data-theme` attribute swap the whole look.
+
+   No `@plugin "daisyui/theme"` block is needed: verified on DaisyUI 5.7.16 that
+   components resolve --color-* straight off :root, which is where theme.css
+   declares them. Don't add one — it would give the literals a second home. */
+@plugin "daisyui" {
+  themes: false;
+}

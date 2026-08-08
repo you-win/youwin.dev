@@ -1,0 +1,9 @@
+# The public archive is meant to be indexed. Per-page exclusions are handled by
+# a <meta name="robots" content="noindex"> tag instead: unlisted posts and
+# paginated pages carry it, everything else does not. Drafts never render at all.
+#
+# write.youwin.dev is a separate host with its own (absent) robots.txt; its shell
+# carries noindex directly, and nothing there is reachable without a session.
+
+User-agent: *
+Allow: /

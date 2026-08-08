@@ -1,0 +1,196 @@
+/* mistwood — deep, cold, low-chroma green. The palette of standing water and
+   lichen under closed canopy. OKLCH throughout so the base-100 → base-300 ramp
+   steps evenly to the eye rather than evenly in sRGB (which it wouldn't).
+   Hue sits at 162 for the surfaces (blue-green, damp) and drifts to 158/152 for
+   foreground tokens so text reads slightly warmer than the ground it sits on.
+
+   THIS FILE IS THE ONLY PLACE AN OKLCH LITERAL IS WRITTEN. Both bundles import
+   it: public.css (Tailwind + theme, no DaisyUI) for the server-rendered site,
+   and app.css (Tailwind + DaisyUI + theme) for the authoring SPA.
+
+   The custom property names are DaisyUI's, so DaisyUI components in the SPA
+   inherit these values with no theme block at all — verified on 5.7.16. */
+
+/* `@theme`, not `:root`.
+   Tailwind v4 generates utilities (bg-base-200, text-secondary, border-base-300,
+   rounded-box) only from variables declared here; a `:root` block would define
+   perfectly good custom properties that no utility class ever references. The
+   `static` modifier emits every variable whether or not Tailwind can see it
+   used, which DaisyUI needs — its component CSS reads --color-* at runtime, so
+   usage-based pruning would strip values out from under it. */
+@theme static {
+  /* Surfaces */
+  --color-base-100: oklch(17% 0.016 162); /* forest floor — page */
+  --color-base-200: oklch(21% 0.020 162); /* post cards */
+  --color-base-300: oklch(26% 0.024 162); /* borders, hover, dividers */
+  --color-base-content: oklch(91% 0.014 152); /* mist — body text */
+
+  /* Lichen glow. Actions and links. */
+  --color-primary: oklch(74% 0.105 158);
+  --color-primary-content: oklch(16% 0.026 158);
+
+  /* Cold water. Timestamps, metadata, anything that should recede. */
+  --color-secondary: oklch(63% 0.055 196);
+  --color-secondary-content: oklch(96% 0.010 196);
+
+  /* New growth. Used sparingly — highlights, active thread markers. */
+  --color-accent: oklch(82% 0.085 128);
+  --color-accent-content: oklch(18% 0.030 128);
+
+  --color-neutral: oklch(28% 0.018 162);
+  --color-neutral-content: oklch(88% 0.012 162);
+
+  /* Status colors are pulled toward the same low-chroma register so a warning
+     toast doesn't look like it wandered in from another application. */
+  --color-info: oklch(72% 0.075 222);
+  --color-info-content: oklch(16% 0.025 222);
+  --color-success: oklch(74% 0.120 150);
+  --color-success-content: oklch(16% 0.030 150);
+  --color-warning: oklch(80% 0.110 82);
+  --color-warning-content: oklch(18% 0.030 82);
+  --color-error: oklch(66% 0.160 24);
+  --color-error-content: oklch(97% 0.012 24);
+
+  --radius-selector: 0.5rem;
+  --radius-field: 0.5rem;
+  --radius-box: 1rem;
+
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+
+  --border: 1px;
+
+  /* Flat on purpose. Mist has no hard edges, so cards are separated by a 1px
+     base-300 border rather than a drop shadow — depth comes from the vignette
+     below instead. */
+  --depth: 0;
+  --noise: 0;
+
+  --font-prose: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, Consolas,
+    monospace;
+}
+
+/* `color-scheme` is a property, not a custom property, so it cannot live in
+   @theme. It tells the browser to render form controls, scrollbars, and the
+   default canvas dark — without it a native <select> arrives white. */
+:root {
+  color-scheme: dark;
+}
+
+@layer base {
+  /* A fixed radial lift at the top of the viewport falling to near-black at the
+     bottom. Without it a full-height dark page reads as a flat rectangle; with
+     it, the feed reads as something receding into the trees. Fixed rather than
+     scrolled so the gradient belongs to the window, not to the document. */
+  body {
+    background-color: var(--color-base-100);
+    background-image:
+      radial-gradient(
+        120% 80% at 50% -10%,
+        oklch(26% 0.030 165 / 0.85) 0%,
+        oklch(20% 0.020 163 / 0.45) 38%,
+        transparent 72%
+      );
+    background-attachment: fixed;
+    background-repeat: no-repeat;
+    min-height: 100dvh;
+    color: var(--color-base-content);
+  }
+
+  html {
+    font-family: var(--font-prose);
+    -webkit-text-size-adjust: 100%;
+  }
+
+  /* iOS Safari zooms the page when a focused input is under 16px. */
+  textarea,
+  input,
+  select {
+    font-size: max(16px, 1rem);
+  }
+
+  ::selection {
+    background-color: oklch(74% 0.105 158 / 0.28);
+  }
+
+  /* Keyboard focus has to survive a low-contrast palette — the ring is primary,
+     not a browser default that would vanish against base-200. */
+  :focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+}
+
+/* Rendered post bodies. The server emits a fixed, sanitized tag set (see
+   render/markdown.rs) and both surfaces drop it in verbatim — maud PreEscaped on
+   the public site, innerHTML in the SPA — so this styles exactly that set and
+   nothing else. Shared here precisely so the two renderings cannot drift. */
+@layer components {
+  .post-body {
+    line-height: 1.6;
+    overflow-wrap: anywhere; /* an unbroken URL must not widen the card */
+  }
+
+  .post-body > * + * {
+    margin-top: 0.75em;
+  }
+
+  .post-body a {
+    color: var(--color-primary);
+    text-decoration: underline;
+    text-underline-offset: 0.2em;
+    text-decoration-thickness: 1px;
+    text-decoration-color: oklch(74% 0.105 158 / 0.45);
+  }
+
+  .post-body a:hover {
+    text-decoration-color: var(--color-primary);
+  }
+
+  .post-body code {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+    padding: 0.1em 0.35em;
+    border-radius: 0.25rem;
+    background-color: var(--color-base-300);
+  }
+
+  .post-body pre {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+    padding: 0.75rem 1rem;
+    border-radius: var(--radius-field);
+    background-color: var(--color-base-300);
+    overflow-x: auto;
+  }
+
+  .post-body pre code {
+    padding: 0;
+    background: none;
+  }
+
+  .post-body blockquote {
+    padding-left: 1rem;
+    border-left: 2px solid var(--color-base-300);
+    color: oklch(91% 0.014 152 / 0.75);
+  }
+
+  .post-body ul,
+  .post-body ol {
+    padding-left: 1.5rem;
+  }
+
+  .post-body ul {
+    list-style: disc;
+  }
+
+  .post-body ol {
+    list-style: decimal;
+  }
+
+  .post-body hr {
+    border-color: var(--color-base-300);
+  }
+}

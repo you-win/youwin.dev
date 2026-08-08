@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = ["crates/server"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.94"
+publish = false
+
+# Release builds run on the server (see DESIGN.md "Build"), so favour a smaller,
+# faster binary over compile time. LTO and one codegen unit cost a minute or two
+# on a redeploy and nothing at runtime.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

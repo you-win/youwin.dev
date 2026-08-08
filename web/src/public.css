@@ -1,0 +1,15 @@
+/* The public archive at youwin.dev. Tailwind + the mistwood tokens, NO DaisyUI —
+   a read-only site needs typography and layout, not components. Target is ~5KB.
+
+   Emitted as a content-hashed asset; the server resolves the hashed URL from
+   Vite's manifest.json at startup. Deliberately NOT inlined into the document:
+   inlining would re-send the same bytes on every navigation, while one immutable
+   file is fetched once and reused across the feed, permalinks, and about. */
+
+@import "tailwindcss" source(none);
+@import "./theme.css";
+
+/* source(none) above disables Tailwind's automatic file detection, so this
+   bundle sees ONLY the maud templates and never picks up classes from the
+   authoring SPA. That exclusion is what keeps it small. */
+@source "../../crates/server/src/public/**/*.rs";

@@ -1,0 +1,12 @@
+/target
+node_modules/
+web/dist/
+
+# The SQLite database and its WAL sidecars. Local dev only — production lives in
+# /var/lib/youwin. Never commit any of the three.
+*.db
+*.db-wal
+*.db-shm
+
+# Holds YOUWIN_PASSWORD_HASH in dev; the server reads it via dotenv-less env.
+.env
