@@ -439,17 +439,61 @@ sudo systemctl status youwin-backup.service  # oneshot: confirm it exited 0
 
 **11. [optional] Cache purging on write**
 
-Skip this and the site runs on the `s-maxage` TTL alone, which is correct: an
-edit takes up to five minutes to appear. To close that gap, create a **second**
-Cloudflare API token with the `Cache Purge` permission — not the DNS-01 token
-Caddy uses, which is scoped to DNS and should stay that way:
+Skip this and the site runs on the `s-maxage` TTL alone, which is correct — an
+edit just takes up to five minutes to appear. This closes that gap. It needs two
+values.
+
+**The zone ID** identifies which zone to purge, and goes straight into the API
+path the server calls (`/zones/<id>/purge_cache`). It is a 32-character hex
+string, *not* the domain name — the API will not accept `youwin.dev` there.
+
+Cloudflare dashboard → select the **youwin.dev** zone → **Overview** → the
+right-hand column, under **API** → **Zone ID**, with a copy button. It is not a
+secret; it appears in URLs and support threads routinely, which is why it sits
+beside the token rather than being treated like one.
+
+From the command line instead, with any token that can read zones:
 
 ```bash
-echo 'YOUWIN_CF_PURGE_TOKEN=...' | sudo tee -a /etc/youwin/secrets.env
-sudo sed -i 's|^#Environment=YOUWIN_CF_ZONE_ID=.*|Environment=YOUWIN_CF_ZONE_ID=<zone id>|' /etc/systemd/system/youwin.service
-sudo systemctl daemon-reload && sudo systemctl restart youwin
+curl -s -H "Authorization: Bearer $CF_TOKEN" \
+  'https://api.cloudflare.com/client/v4/zones?name=youwin.dev' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"][0]["id"])'
+```
+
+**The purge token** is a **second** API token, separate from the DNS-01 one Caddy
+uses — that one is scoped to DNS edits and should stay that way. My Profile →
+API Tokens → **Create Token** → Create Custom Token:
+
+- **Permissions:** `Zone` → `Cache Purge` → `Purge`
+- **Zone Resources:** Include → Specific zone → `youwin.dev`
+
+Both go in `secrets.env`, which the unit already loads — nothing edits the unit
+file itself, because a deploy can reinstall it and take a hand-edited value with
+it:
+
+```bash
+sudo tee -a /etc/youwin/secrets.env >/dev/null <<'EOF'
+YOUWIN_CF_ZONE_ID=<32 hex characters>
+YOUWIN_CF_PURGE_TOKEN=<the purge token>
+EOF
+sudo systemctl restart youwin
+
 journalctl -u youwin -n 20 | grep 'edge cache'   # expect: cache_purging="on"
 ```
+
+That log line only says the server *found* both values. To prove the credentials
+actually work, watch the log while you write something:
+
+```bash
+journalctl -u youwin -f
+```
+
+Then create or edit a post in the app. Expect `purged the edge cache`. A failure
+logs `cache purge refused` together with the HTTP status **and Cloudflare's
+response body**, which names the reason — a 404 means the zone ID is wrong, a 403
+means the token lacks Cache Purge or is not scoped to this zone. That body is
+logged for exactly this moment; a bare status code would leave those two
+indistinguishable.
 
 ## Moving timothyyuen.io onto Cloudflare at the same time
 
