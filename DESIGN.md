@@ -785,105 +785,50 @@ alternative that avoids the custom build entirely is a Cloudflare Origin CA cert
 rejected because it is trusted only by Cloudflare: turning the proxy off would break the site
 for browsers, which is exactly the wrong failure mode for the escape hatch.
 
-```caddyfile
-# The public archive. No JS, no cookies, no API — so the whole surface is
-# edge-cacheable and the CSP can forbid script outright.
-youwin.dev, www.youwin.dev {
-        tls {
-                dns cloudflare {env.CF_API_TOKEN}
-        }
+The config itself is not reproduced here. It runs to a hundred and forty lines that have to
+be byte-correct to be worth reading; the real one is checked by `caddy validate` against a
+real Caddy carrying the DNS-01 module during setup ([`deploy/README.md`](deploy/README.md)
+step 5), and a copy in this file is checked by nothing. The copy that used to sit here had
+drifted to the old `/var/www/youwin` roots, a stale CSP, and — worse — a directive form that
+Caddy rejects outright. Read [`deploy/youwin.dev.caddy`](deploy/youwin.dev.caddy); what
+follows is why it looks the way it does.
 
-        encode zstd gzip
+**Two cache tiers, and the second one is only half in this file.** Content-hashed assets get
+`max-age=31536000, immutable`; server-rendered HTML gets `max-age=60` for the browser and
+`s-maxage=300` for Cloudflare. The favicons and `robots.txt` sit between them at a day. The
+`s-maxage` is inert on its own: Cloudflare does not cache HTML by default, so it also needs a
+cache rule in the dashboard, and without that every request reaches the origin while this
+file looks entirely correct. What the five-minute edge TTL costs, and the purge-on-write that
+buys it back, are under **Purge on write** in *Public site* above.
 
-        # The one stylesheet (content-hashed) plus favicons and robots.txt.
-        # Served off disk; the app never touches CSS bytes.
-        handle /assets/* {
-                root * /var/www/youwin/public
-                header Cache-Control "public, max-age=31536000, immutable"
-                file_server {
-                        precompressed br gzip
-                }
-        }
-        handle /favicon.ico /robots.txt {
-                root * /var/www/youwin/public
-                file_server
-        }
+**A list of paths needs a named matcher.** Every Caddy directive takes at most **one**
+matcher token, so `handle /favicon.ico /robots.txt { … }` is not a shorter spelling of
+anything — it fails `caddy validate` with "wrong argument count", and because the box loads
+`conf.d/*.caddy` into one config, a rejected file takes down *every* site on the server, not
+just this one. Both places that serve a set of paths (`@root_files` on the public host,
+`@pwa` on the authoring one) bind the list to a matcher first.
 
-        # Everything else is server-rendered HTML. max-age is for the browser,
-        # s-maxage for Cloudflare — which also needs a cache rule, since CF does
-        # not cache HTML by default.
-        reverse_proxy 127.0.0.1:8080
-        header Cache-Control "public, max-age=60, s-maxage=300"
+**`handle` blocks are sorted by specificity, not by the order they appear in.** This is what
+makes the preview work: `/preview` renders through the *public* templates, so it links the
+public stylesheet by a root-absolute path that resolves against `write.youwin.dev`. A
+`handle /assets/public-*` block on that host serves that one file out of the public root, and
+it beats the sibling `/assets/*` block wherever either is written. Verified with
+`caddy adapt`. Vite's hashed names cannot collide across the two builds, so it is safe even
+if the ordering were ever to change.
 
-        header {
-                X-Content-Type-Options "nosniff"
-                Referrer-Policy "strict-origin-when-cross-origin"
-                X-Frame-Options "SAMEORIGIN"
-                Strict-Transport-Security "max-age=31536000; includeSubDomains"
-                Content-Security-Policy "default-src 'none'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
-                -Server
-        }
-}
+**The public CSP is `default-src 'none'`, and it is honest.** A site that ships zero
+JavaScript can assert that at no cost, which makes it the strongest policy on the box. Only
+three things are opened up: `style-src 'self'` for the one stylesheet, `img-src 'self' data:`,
+and — as of M5 — `form-action 'self'`, because the header carries a GET search form. That
+last one is easy to get wrong: `form-action` does **not** fall back to `default-src`, so it is
+the only line governing the submission, and leaving it at `'none'` blocks the search box while
+every other directive still reads as correct.
 
-# The authoring app. Session cookie lives here and ONLY here.
-write.youwin.dev {
-        tls {
-                dns cloudflare {env.CF_API_TOKEN}
-        }
-
-        encode zstd gzip
-
-        # JSON API and the authenticated /preview route. Listed first so it wins
-        # over the SPA fallback below.
-        handle /api/* {
-                reverse_proxy 127.0.0.1:8081
-        }
-        handle /preview/* {
-                reverse_proxy 127.0.0.1:8081
-        }
-
-        # Content-hashed SPA build output → immutable.
-        handle /assets/* {
-                root * /var/www/youwin/write
-                header Cache-Control "public, max-age=31536000, immutable"
-                file_server {
-                        precompressed br gzip
-                }
-        }
-
-        # PWA plumbing: on disk, but MUST revalidate. A cached sw.js pins an old
-        # build on every installed device until it expires.
-        handle /sw.js /manifest.webmanifest /icons/* {
-                root * /var/www/youwin/write
-                header Cache-Control "no-cache"
-                file_server
-        }
-
-        # Client-routed SPA: serve the file if it exists, else the shell.
-        handle {
-                root * /var/www/youwin/write
-                try_files {path} /index.html
-                file_server
-                header Cache-Control "no-cache"
-        }
-
-        # Nothing here is ever cached at the edge — it is all authenticated.
-        header {
-                X-Content-Type-Options "nosniff"
-                Referrer-Policy "strict-origin-when-cross-origin"
-                X-Frame-Options "DENY"
-                Strict-Transport-Security "max-age=31536000; includeSubDomains"
-                Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
-                -Server
-        }
-}
-```
-
-Two things worth noting against the existing blocks. The public CSP is
-`default-src 'none'` with only `style-src` and `img-src` opened up — a genuinely no-JS
-site can assert that, and it's the strongest policy on the box. And `write.youwin.dev`
-takes `X-Frame-Options: DENY` rather than `SAMEORIGIN`, because nothing should ever frame
-the composer.
+**`write.youwin.dev` takes `X-Frame-Options: DENY`** rather than the public site's
+`SAMEORIGIN`, because nothing should ever frame the composer. Nothing on that host is cached
+at the edge either — it is all authenticated — and the PWA plumbing (`sw.js`, the manifest,
+the icons) is served `no-cache` rather than off the immutable tier, since a cached service
+worker pins an old build on every installed device until it expires.
 
 **systemd** — one unit, `Type=exec`, `Restart=on-failure`,
 `EnvironmentFile=/etc/youwin/secrets.env` (mode 0600, holds `YOUWIN_PASSWORD_HASH`).
