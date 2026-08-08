@@ -2,6 +2,10 @@
 node_modules/
 web/dist/
 
+# The dev service worker vite-plugin-pwa emits when devOptions is enabled.
+# Generated build output, and it vendors a copy of workbox.
+web/dev-dist/
+
 # The SQLite database and its WAL sidecars. Local dev only — production lives in
 # /var/lib/youwin. Never commit any of the three.
 *.db
