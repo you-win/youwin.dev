@@ -66,10 +66,13 @@ pub const SAMPLE: usize = 16;
 /// none. Six hours is a working day with a couple of visits in it.
 pub const FALLBACK_GAP_HOURS: f64 = 6.0;
 
-/// The standard normal's 75th percentile is not used here — the upper quartile is
-/// read straight off the sample. Named for the one place a quantile is asked for
-/// by a name rather than a number.
+/// The gap the writer exceeds about a quarter of the time. Sets the decay curve.
 const UPPER_QUARTILE: f64 = 0.75;
+
+/// The gap the writer exceeds about one time in ten. A silence past this is an
+/// absence rather than a quiet stretch, which is what [`super::spark`] welcomes
+/// them back from.
+const RARE: f64 = 0.90;
 
 /// One distribution, as its most recent [`SAMPLE`] observations, sorted.
 ///
@@ -147,9 +150,13 @@ pub struct Baseline {
     gaps: Sample,
     sittings: Sample,
     words: Sample,
-    /// Posts in the most recent sitting — the observation `sittings` is there to
-    /// judge. Held here so the clustering runs once.
+    /// The most recent sitting — the observation the samples above exist to
+    /// judge, rather than another distribution. Held here so the clustering runs
+    /// once for both.
     latest_sitting: usize,
+    latest_start: Option<i64>,
+    /// Silence before the latest sitting. `None` when it is the only one.
+    latest_gap: Option<f64>,
 }
 
 impl Default for Baseline {
@@ -159,6 +166,8 @@ impl Default for Baseline {
             sittings: Sample::of(&[]),
             words: Sample::of(&[]),
             latest_sitting: 0,
+            latest_start: None,
+            latest_gap: None,
         }
     }
 }
@@ -181,10 +190,12 @@ impl Baseline {
         let words: Vec<f64> = posts.iter().map(|post| words(post) as f64).collect();
 
         Self {
+            latest_sitting: sittings.last().map_or(0, |(_, posts)| *posts),
+            latest_start: sittings.last().map(|(start, _)| *start),
+            latest_gap: gaps.last().copied(),
             gaps: Sample::of(&gaps),
             sittings: Sample::of(&sizes),
             words: Sample::of(&words),
-            latest_sitting: sittings.last().map_or(0, |(_, posts)| *posts),
         }
     }
 
@@ -211,9 +222,37 @@ impl Baseline {
         self.gaps.quantile(UPPER_QUARTILE).unwrap_or(FALLBACK_GAP_HOURS)
     }
 
+    /// The gap this writer exceeds about one time in ten.
+    ///
+    /// Past this a silence has stopped being a quiet stretch and become an
+    /// absence — which is the only kind worth welcoming somebody back from.
+    pub fn rare_gap_hours(&self) -> f64 {
+        self.gaps.quantile(RARE).unwrap_or(FALLBACK_GAP_HOURS)
+    }
+
+    /// How many gaps the distributions were actually read from.
+    ///
+    /// Exposed so a caller can refuse to make a claim the sample cannot support.
+    /// "Longer than nine tenths of your gaps" is a real statement about sixteen
+    /// of them and an opinion about three.
+    pub fn measured_gaps(&self) -> usize {
+        self.gaps.len
+    }
+
     /// Posts in the most recent sitting.
     pub fn latest_sitting_posts(&self) -> usize {
         self.latest_sitting
+    }
+
+    /// When the most recent sitting began. `None` for an empty archive.
+    pub fn latest_sitting_start(&self) -> Option<i64> {
+        self.latest_start
+    }
+
+    /// The silence the most recent sitting ended. `None` when it is the only
+    /// sitting there has ever been, which is not a silence but a beginning.
+    pub fn gap_before_latest_sitting(&self) -> Option<f64> {
+        self.latest_gap
     }
 
     /// How unusual a silence of `hours` is: the share of this writer's gaps that

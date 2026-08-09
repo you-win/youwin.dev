@@ -6,7 +6,7 @@
 //! need. Everything here is a total function of [`PetState`] — no allocation
 //! beyond the three output lines, no ordering, no I/O.
 
-use crate::familiar::{Form, Level, Mood, PetState, Phase, Stage};
+use crate::familiar::{Form, Level, Mood, PetState, Phase, Spark, Stage};
 
 /// Weight a secondary topic needs before an adult picks up its trinket.
 ///
@@ -14,8 +14,6 @@ use crate::familiar::{Form, Level, Mood, PetState, Phase, Stage};
 /// time a stray post tipped the blend.
 const TRINKET_THRESHOLD: f64 = 0.25;
 
-/// Post counts worth a small fuss.
-const MILESTONES: [usize; 3] = [10, 50, 100];
 
 /// The assembled pet: one to three lines, top to bottom, already trimmed.
 ///
@@ -317,15 +315,23 @@ fn sleep(state: &PetState) -> &'static str {
     }
 }
 
-/// Corner stars. The big one is an adult at full tilt with something to be
-/// excited about; the small one marks a round number of posts.
+/// Corner marks. The big star is an adult at full tilt with something to be
+/// excited about, and is a reading of the present. The other two are
+/// [`Spark`]s — events that happened and are fading — and are the only thing
+/// here that depends on when something occurred rather than on how things are.
+///
+/// Three glyphs rather than one because they mean different things: `★` is the
+/// pet at its best, `*` is a round number, `✧` is the pet waking up from an
+/// absence. A shared glyph would make the rarest of the three unrecognisable.
 fn celebration(state: &PetState) -> (&'static str, &'static str) {
     if state.stage == Stage::Adult && state.level == Level::Hyper && state.mood == Mood::Excited {
-        ("★", "★")
-    } else if MILESTONES.contains(&state.posts) {
-        ("*", "*")
-    } else {
-        ("", "")
+        return ("★", "★");
+    }
+
+    match state.spark {
+        Some(Spark::Milestone(_)) => ("*", "*"),
+        Some(Spark::Rekindled) => ("✧", "✧"),
+        None => ("", ""),
     }
 }
 
@@ -369,6 +375,7 @@ mod tests {
             level: Level::Active,
             phase: Phase::Active,
             posts: 60,
+            spark: None,
             at: START,
         }
     }
@@ -474,13 +481,30 @@ mod tests {
     }
 
     #[test]
-    fn a_milestone_gets_small_stars() {
+    fn each_kind_of_spark_gets_its_own_mark() {
         let mut counting = state();
-        counting.posts = 50;
+        counting.spark = Some(Spark::Milestone(50));
         assert_eq!(kaomoji(&counting).lines[0], "* ┬ ┬ *");
 
-        counting.posts = 51;
+        // A return is not a round number, and reads as neither.
+        counting.spark = Some(Spark::Rekindled);
+        assert_eq!(kaomoji(&counting).lines[0], "✧ ┬ ┬ ✧");
+
+        counting.spark = None;
         assert_eq!(kaomoji(&counting).lines[0], "┬ ┬");
+    }
+
+    #[test]
+    fn the_pet_at_its_best_outranks_any_spark() {
+        // The big star is a reading of the present and the marks are events; when
+        // both are true the present wins, because a pet that is currently
+        // delighted is the more interesting fact.
+        let mut loud = state();
+        loud.mood = Mood::Excited;
+        loud.level = Level::Hyper;
+        loud.spark = Some(Spark::Rekindled);
+
+        assert_eq!(kaomoji(&loud).lines[0], "★ ┻ ┻ ★");
     }
 
     #[test]

@@ -33,12 +33,14 @@ pub mod cache;
 pub mod energy;
 pub mod mood;
 pub mod render;
+pub mod spark;
 pub mod speech;
 pub mod stats;
 pub mod topics;
 
 pub use baseline::Baseline;
 pub use cache::{Familiar, Reading};
+pub use spark::Spark;
 
 /// The mood a post was written in. Owned by the crate, not by the pet — see
 /// [`crate::mood`].
@@ -398,6 +400,10 @@ pub struct PetState {
     pub level: Level,
     pub phase: Phase,
     pub posts: usize,
+    /// Something the archive did recently enough to still be showing — the one
+    /// field here that is not a steady-state reading of the present. See
+    /// [`spark`].
+    pub spark: Option<Spark>,
     /// Unix millis this state describes.
     pub at: i64,
 }
@@ -426,8 +432,14 @@ pub fn compute(posts: &[Morsel], previous: Option<&PetState>, now: i64) -> PetSt
     let form = topic.form().unwrap_or(Form::Hexapod);
     let mood = mood::latest(tail(visible, MOOD_WINDOW));
 
+    // Built once and shared. Energy asks it how long a long silence is for this
+    // writer, and the spark asks it how long an unusual one is — two questions
+    // about the same distribution, and reading it twice would be one clustering
+    // pass over the archive for nothing.
+    let rhythm = Baseline::of(visible);
+
     let phase = energy::phase_at(visible, now);
-    let base_energy = energy::step(visible, previous, now);
+    let base_energy = energy::step(visible, &rhythm, previous, now);
 
     // The phase modifier is applied here, to the value about to be drawn, and is
     // never written back into `base_energy`. Folding it in would make energy a
@@ -447,6 +459,7 @@ pub fn compute(posts: &[Morsel], previous: Option<&PetState>, now: i64) -> PetSt
         level: Level::of(energy),
         phase,
         posts: visible.len(),
+        spark: spark::detect(visible, &rhythm, now),
         at: now,
     }
 }

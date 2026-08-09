@@ -187,6 +187,35 @@ async fn an_ordinary_archive_has_nothing_to_say(pool: SqlitePool) {
 }
 
 #[sqlx::test]
+async fn a_milestone_outlives_the_post_after_it(pool: SqlitePool) {
+    let app = common::app(pool);
+    let cookie = login(&app).await;
+
+    for n in 0..10 {
+        create_post(&app, &cookie, &format!("note number {n}, about rust"), "public").await;
+    }
+
+    let crossed = familiar(&app, &cookie).await;
+    let drawn = |pet: &serde_json::Value| pet["lines"][0].as_str().expect("lines").to_owned();
+    assert!(drawn(&crossed).contains('*'), "no fuss at ten: {}", drawn(&crossed));
+
+    // The regression. This was drawn only while the count was *exactly* ten, so
+    // an eleventh post ended the only celebration the pet offers — whether or
+    // not anyone had loaded the page in between. It is an event with a window
+    // now, and the window is measured from the tenth post rather than from the
+    // count still being ten.
+    create_post(&app, &cookie, "note number 11, about rust", "public").await;
+
+    let after = familiar(&app, &cookie).await;
+    assert_eq!(after["posts"], 11);
+    assert!(
+        drawn(&after).contains('*'),
+        "the eleventh post cancelled the tenth's milestone: {}",
+        drawn(&after),
+    );
+}
+
+#[sqlx::test]
 async fn what_the_preview_promises_is_what_posting_delivers(pool: SqlitePool) {
     let app = common::app(pool);
     let cookie = login(&app).await;

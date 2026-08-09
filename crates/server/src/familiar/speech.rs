@@ -30,7 +30,7 @@
 //! monopolise the line — once two candidates are both pinned at the ceiling they
 //! take turns, by the day.
 
-use crate::familiar::{Baseline, Mood, Morsel, PetState, baseline, energy};
+use crate::familiar::{Baseline, Mood, Morsel, PetState, Spark, baseline, energy};
 
 /// Surprise below which the pet says nothing.
 ///
@@ -89,6 +89,7 @@ pub fn speak(
 ) -> Option<Utterance> {
     let candidates = [
         silence(posts, habits, now),
+        rekindled(habits, state),
         abundance(posts, habits, now),
         length(posts, habits, now),
         odd_hour(posts, now),
@@ -164,6 +165,31 @@ fn silence(posts: &[Morsel], habits: &Baseline, now: i64) -> Option<Candidate> {
     Some(Candidate {
         line: format!("it has not been fed in {}.", duration(quiet)),
         probability: habits.gap_at_least(quiet),
+    })
+}
+
+/// The silence that just ended, for a pet that has only now come back from it.
+///
+/// The mirror of [`silence`], and it inherits that candidate's arithmetic
+/// exactly: the tail of the gap the latest sitting closed is the same number
+/// `silence` would have reported an hour before the returning post landed. The
+/// two can never both fire — once something has been written, the gap since the
+/// last post is nothing and `silence` falls under the floor by itself — so the
+/// pet reports an absence right up until it ends and then reports the ending.
+///
+/// Gated on the spark rather than re-deriving the condition, so what the pet
+/// *says* about coming back and what it *draws* can never disagree about
+/// whether it happened.
+fn rekindled(habits: &Baseline, state: &PetState) -> Option<Candidate> {
+    if state.spark != Some(Spark::Rekindled) {
+        return None;
+    }
+
+    let gap = habits.gap_before_latest_sitting()?;
+
+    Some(Candidate {
+        line: format!("it stirs, after {}.", duration(gap)),
+        probability: habits.gap_at_least(gap),
     })
 }
 

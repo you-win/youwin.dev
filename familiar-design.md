@@ -248,6 +248,51 @@ It lives on the `Reading`, not on each surface, so the widget, the sheet and the
 say three different things about one moment — and so the day-rotation lands on one answer per
 snapshot.
 
+## Sparks — the pet's first transient
+
+*Implemented in [`familiar/spark.rs`](crates/server/src/familiar/spark.rs).*
+
+Everything else in `PetState` is a steady-state reading of the present: what the archive looks
+like now, drawn now. A **spark** is not — it is something that happened at a moment and fades
+afterwards. The shape is worth getting right once, because anticipation and appetite will both
+want it.
+
+It holds the invariants. The event's timestamp is in the archive, how long ago it was comes from
+`now`, and the window it survives comes from the writer's own rhythm — still a pure function of
+`(posts, now)`, still nothing stored. Delete the post that caused it and it never happened.
+
+**Milestones already existed and were unwatchable.** The pose was drawn while the post count was
+*exactly* ten, fifty or a hundred — a window of zero. Post your fiftieth and fifty-first an hour
+apart and the only celebration the pet offers existed for that hour, seen or not. A reward you
+can miss without knowing it was there is worse than none. A milestone is now the *timestamp of
+the Nth post*, and it lasts a window.
+
+**Rekindling is what the whole premise was missing.** Coming back after a real absence showed a
+floored pet climbing slowly out of it: the absence was punished and the return was not rewarded,
+which is backwards for a creature meant to be a reason to write again. The first sitting after a
+genuine silence is now an event in its own right — `✧` in the corners where a milestone puts
+`*`, and a line in speech.
+
+**An absence is both unusual and long, and it needs both tests.** The 90th-percentile gap alone
+fails on exactly the degeneracy that ruled out a median absolute deviation in the baseline: for
+a writer whose gaps are all alike, the ninetieth percentile *is* the ordinary gap, so anything
+beyond it clears the bar and a daily writer skipping one day gets welcomed back from nowhere. A
+silence must also run to three times the typical gap. It also needs half a sample of gaps behind
+it — but not the full sample `speech`'s odd-hour claim demands, because that one is judged
+against a prior and this against observations, and a fortnight away is precisely when somebody
+needs welcoming back rather than being told there is insufficient data.
+
+**The window is two of the writer's own gaps**, floored at a day and capped at a fortnight. Two
+rather than one because at one a daily writer's milestone expires at the exact moment they next
+sit down — a spark has to last *past* the next sitting, not up to it.
+
+The speech line for a return is the mirror of the silence line and inherits its arithmetic
+exactly: the tail of the gap just closed is the number `silence` would have reported an hour
+before the returning post landed. The two can never both fire, so the pet reports an absence
+right up until it ends and then reports the ending. It is gated on the spark rather than
+re-deriving the condition, so what the pet says about coming back and what it draws cannot
+disagree about whether it happened.
+
 ## What comes next
 
 None of this is built. Ordered by how much dynamism they buy per unit of code, and every one of
@@ -279,14 +324,6 @@ During a predicted peak with nothing posted yet, the pet can be *expectant* — 
 fires at the moment you would plausibly write anyway. Appetite is the same idea on the topic
 axis: a diet that has been all tech for a fortnight is a deficit the pet can visibly want
 something else for. Both are pull, not obligation, which is the line.
-
-**Rekindling, and milestones that last.** Coming back after three weeks currently shows a
-floored pet that recovers slowly — the absence is punished and the return is not rewarded. The
-first post after a gap past the writer's own 90th percentile should be a distinct, visible
-event, derivable entirely from the length of the last gap and the hours since that post. The
-same trick fixes the milestone stars, which today appear only while the post count is *exactly*
-10, 50 or 100 and can be missed entirely: find the fiftieth post's timestamp and celebrate for a
-day after it.
 
 **A character sheet that breathes.** Four of the five stats barely move — WIS is `posts/100`,
 CUR and MAG are whole-archive shares, STR is posts against a fixed prolific baseline. Only VIT

@@ -85,12 +85,16 @@ const HOUR_MILLIS: i64 = 3_600_000;
 /// holding down F5, and one visited through the night would be driven to the
 /// floor by traffic rather than by silence. [`super::compute`] adds the offset to
 /// the copy it renders and throws it away.
-pub fn step(posts: &[Morsel], previous: Option<&PetState>, now: i64) -> f64 {
+pub fn step(
+    posts: &[Morsel],
+    rhythm: &Baseline,
+    previous: Option<&PetState>,
+    now: i64,
+) -> f64 {
     let Some(last) = posts.last() else {
         return EMPTY_ENERGY;
     };
 
-    let rhythm = Baseline::of(posts);
     let half_life = (rhythm.long_gap_hours() * HALF_LIFE_FACTOR)
         .clamp(MIN_HALF_LIFE_HOURS, MAX_HALF_LIFE_HOURS);
 
