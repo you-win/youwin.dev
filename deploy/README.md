@@ -554,6 +554,17 @@ curl -fsSI https://write.youwin.dev/api/health | grep -i cf-cache-status
 systemctl list-timers youwin-backup.timer
 systemctl show -p ExecMainStatus youwin-backup.service   # 0
 ls -l /var/backups/youwin
+
+# 11 — nothing in deploy/ has shipped without being installed. A deploy cannot
+#      install these, so a change to one of them sits on disk doing nothing
+#      until you act. Silence is correct. See "After deploying a change to
+#      anything in deploy/".
+cd /srv/sites/youwin.dev/current/deploy
+diff -q youwin.dev.caddy /etc/caddy/conf.d/youwin.dev.caddy
+diff -q activate-youwin  /usr/local/bin/activate-youwin
+for u in youwin.service youwin-backup.service youwin-backup.timer; do
+  diff -q "$u" "/etc/systemd/system/$u"
+done
 ```
 
 **The one to look at hardest is `write.youwin.dev`.** If it reports anything
@@ -667,7 +678,10 @@ certificate would not.
 
 ## Routine deploys
 
-Push to `master`. That is the whole procedure.
+Push to `master`. That is the whole procedure — for code, which is almost every
+change. The exception is anything in `deploy/` itself: those need root to
+install, so CI ships them and cannot apply them. See
+[After deploying a change to anything in `deploy/`](#after-deploying-a-change-to-anything-in-deploy).
 
 The workflow is [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml):
 `pnpm install` → typecheck → build → check the expected build outputs exist →
@@ -722,6 +736,84 @@ sudo -u youwin /srv/sites/youwin.dev/current/bin/youwin-server rerender
 ```
 
 Idempotent, safe at any time, and it does not mark anything as edited.
+
+### After deploying a change to anything in `deploy/`
+
+**A deploy does not install these.** CI copies the whole directory into the
+release, so `current/deploy/` always holds the versions matching the running
+binary — but `activate-youwin` only flips a symlink and restarts a service, and
+that is the entire privilege boundary. Installing a systemd unit or a Caddy
+block needs root, which the `deploy` user does not have and should not get.
+
+So a change to one of these files ships, sits on disk, and does nothing until
+you install it. Every one of them fails silently when you forget: the site stays
+up, the timer keeps firing, and the thing you changed simply is not in effect.
+
+Install from `current/`, **after** the deploy carrying the change has landed —
+that is what puts the new copy on the box in the first place:
+
+| File | Installs to | Silent failure if skipped |
+|---|---|---|
+| `youwin.dev.caddy` | `/etc/caddy/conf.d/` | A block you added does nothing. Anything relying on it behaves as though it were absent — a header not set, a path not special-cased, an origin response overwritten by the catch-all |
+| `youwin.service` | `/etc/systemd/system/` | The process keeps its old environment. A new `Environment=` line is invisible, and so is a hardening change |
+| `youwin-backup.service`<br>`youwin-backup.timer` | `/etc/systemd/system/` | The nightly run keeps working and keeps doing the old thing. A new `EnvironmentFile` means a variable you set in `secrets.env` is never seen — which looks exactly like not having configured it |
+| `activate-youwin` | `/usr/local/bin/` | The **next** deploy still runs the old script — see the note below |
+
+**Caddy** — validate with the token in scope and hand the log files back, both
+for the reasons spelled out in step 5c above: a plain `sudo caddy validate`
+fails on a token it cannot see, and creates root-owned log files that Caddy then
+cannot open.
+
+```bash
+sudo install -m 644 -o root -g root /srv/sites/youwin.dev/current/deploy/youwin.dev.caddy /etc/caddy/conf.d/youwin.dev.caddy
+sudo bash -c 'set -a; . /etc/caddy/caddy.env; caddy validate --config /etc/caddy/Caddyfile'
+sudo chown -R caddy:caddy /var/log/caddy
+sudo systemctl reload caddy
+```
+
+**systemd** — `daemon-reload` makes the unit current; the service also needs a
+restart, and `youwin-backup` does not, since the timer starts a fresh oneshot
+each night.
+
+```bash
+cd /srv/sites/youwin.dev/current/deploy
+sudo install -m 644 youwin.service youwin-backup.service youwin-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl restart youwin          # only if youwin.service itself changed
+```
+
+**`activate-youwin`** is the awkward one, because it is the thing CI runs. A
+change to it arrives *with* a release that was activated by the previous
+version, so it takes effect one deploy later:
+
+```bash
+sudo install -m 755 -o root -g root /srv/sites/youwin.dev/current/deploy/activate-youwin /usr/local/bin/activate-youwin
+```
+
+If the release that shipped the change actually needed the new behaviour,
+install it and re-run the activation by hand — it is idempotent, and activating
+the release that is already live is a no-op beyond a restart:
+
+```bash
+sudo /usr/local/bin/activate-youwin "$(basename "$(readlink -f /srv/sites/youwin.dev/current)")"
+```
+
+**Is anything outstanding?** This is the question worth being able to answer at
+a glance, and it is why the release carries `deploy/` at all. Silence means
+everything installed matches what is running:
+
+```bash
+cd /srv/sites/youwin.dev/current/deploy
+diff -q youwin.dev.caddy /etc/caddy/conf.d/youwin.dev.caddy
+diff -q activate-youwin  /usr/local/bin/activate-youwin
+for u in youwin.service youwin-backup.service youwin-backup.timer; do
+  diff -q "$u" "/etc/systemd/system/$u"
+done
+```
+
+Worth running after any deploy that touched this directory, and worth running
+when something behaves as though a change you made never happened — because
+that is exactly what has occurred.
 
 ### Shipping without pushing
 
