@@ -6,6 +6,16 @@
       "runtimeExecutable": "pnpm",
       "runtimeArgs": ["--dir", "web", "run", "dev"],
       "port": 5173
+    },
+    {
+      "name": "public",
+      "runtimeExecutable": "powershell",
+      "runtimeArgs": [
+        "-NoProfile",
+        "-Command",
+        "# Local development only. The public listener has no password, but the process refuses to boot without a hash for the write listener beside it, so this is one for 'local-dev-only-password' against the local youwin.db. Never the deployed one, which lives in the unit's EnvironmentFile.\n$env:YOUWIN_PASSWORD_HASH='$argon2id$v=19$m=19456,t=2,p=1$fuEBL84V/wHzDwXEbrZaYg$hGV00P2QuvEKbFRs/yn9fe5fN89TsdyCt+sGIBbNtmo'\ncargo run -p youwin-server"
+      ],
+      "port": 8080
     }
   ]
 }
