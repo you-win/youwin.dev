@@ -3,7 +3,21 @@ import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import Composer from "../components/Composer";
 import Familiar, { type Draft } from "../components/Familiar";
 import PostCard from "../components/PostCard";
-import { api, type Mood, type Post, type Visibility } from "../lib/api";
+import {
+  api,
+  NetworkError,
+  type Mood,
+  type Post,
+  type Visibility,
+} from "../lib/api";
+import {
+  discard,
+  enqueue,
+  onFlushed,
+  queued,
+  rejected,
+  type Queued,
+} from "../lib/outbox";
 
 /** A post that exists locally but has not come back from the server yet. */
 interface Pending {
@@ -12,6 +26,27 @@ interface Pending {
 }
 
 let nextKey = 0;
+
+/**
+ * A queued post, shaped like one so it can use the same card.
+ *
+ * Everything derived is a placeholder — there is no id, no rendered HTML and no
+ * reply count until the server has seen it — and `pending` is what stops the
+ * card offering actions that would need any of them.
+ */
+function asPost(item: Queued): Post {
+  return {
+    id: `queued-${item.key}`,
+    body: item.body,
+    body_html: "",
+    visibility: item.visibility,
+    mood: item.mood,
+    is_reply: item.parentId !== undefined,
+    reply_count: 0,
+    created_at: item.queuedAt,
+    edited_at: null,
+  };
+}
 
 export default function Feed() {
   const [posts, setPosts] = createSignal<Post[]>([]);
@@ -23,6 +58,8 @@ export default function Feed() {
   const [draft, setDraft] = createSignal<Draft | null>(null);
   /** Bumped after every write, so the familiar refetches what it is now. */
   const [revision, setRevision] = createSignal(0);
+  /** Which rejected post's text was just copied, for a moment of feedback. */
+  const [copied, setCopied] = createSignal<string | null>(null);
 
   let sentinel: HTMLDivElement | undefined;
 
@@ -45,6 +82,18 @@ export default function Feed() {
 
   onMount(() => {
     void loadMore();
+
+    // A post that left the outbox belongs at the top of the feed like any
+    // other. Without this it would not appear until the next reload, which on an
+    // app you leave open is a long time to wonder whether it sent.
+    onCleanup(
+      onFlushed((post) => {
+        setPosts((existing) =>
+          existing.some((p) => p.id === post.id) ? existing : [post, ...existing],
+        );
+        setRevision((n) => n + 1);
+      }),
+    );
 
     // Infinite scroll is fine *here*: this surface is never crawled and never
     // linked into. The public archive paginates by link instead.
@@ -81,6 +130,17 @@ export default function Feed() {
       const created = await api.create(body, visibility, mood);
       setPosts((existing) => [created, ...existing]);
       setRevision((n) => n + 1);
+    } catch (e) {
+      // There is no server to have refused this, so it is not the composer's
+      // problem. Queue it and return normally: the box clears, the post moves
+      // to the outbox, and it goes out when there is a connection.
+      if (e instanceof NetworkError) {
+        enqueue(body, visibility, mood);
+        return;
+      }
+      // Anything the server *did* answer stays the composer's business, which
+      // keeps the text in the box and says why.
+      throw e;
     } finally {
       // Rolled back on failure as well as success — the Composer keeps the text
       // and surfaces the error, so nothing is lost.
@@ -107,7 +167,59 @@ export default function Feed() {
     <div class="flex flex-col gap-4">
       <Familiar draft={draft()} revision={revision()} />
 
-      <Composer onSubmit={submit} onDraftChange={setDraft} />
+      <Composer onSubmit={submit} onDraftChange={setDraft} draftKey="feed" />
+
+      {/* A post the server refused. It keeps its text in full, because the
+          alternative is deleting somebody's writing on their behalf over a 422.
+
+          Copy rather than "put it back in the composer": the composer restores
+          its own draft at construction, so refilling it means forcing a remount
+          — which would throw away whatever is being typed right now to recover
+          something that is already on screen and selectable. */}
+      <For each={rejected()}>
+        {(item) => (
+          <div class="rounded-box border border-error/40 bg-base-200 p-4">
+            <p class="mb-2 text-sm text-error">
+              This could not be posted: {item.error}
+            </p>
+            <div class="post-body whitespace-pre-wrap">{item.body}</div>
+            <div class="mt-3 flex gap-2">
+              <button
+                type="button"
+                class="btn btn-ghost btn-xs"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(item.body);
+                    setCopied(item.key);
+                    setTimeout(() => setCopied(null), 2000);
+                  } catch {
+                    // The text is on screen either way; nothing is lost.
+                  }
+                }}
+              >
+                {copied() === item.key ? "Copied" : "Copy text"}
+              </button>
+              <button
+                type="button"
+                class="btn btn-ghost btn-xs text-error/70 hover:text-error"
+                onClick={() => discard(item.key)}
+              >
+                Discard
+              </button>
+            </div>
+          </div>
+        )}
+      </For>
+
+      <For each={queued()}>
+        {(item) => (
+          <PostCard
+            post={asPost(item)}
+            pending
+            pendingLabel="waiting for a connection"
+          />
+        )}
+      </For>
 
       <For each={pending()}>
         {(item) => <PostCard post={item.post} pending />}
@@ -147,7 +259,14 @@ export default function Feed() {
         <p class="py-4 text-center text-sm text-secondary">Loading…</p>
       </Show>
 
-      <Show when={exhausted() && posts().length === 0 && !loading()}>
+      <Show
+        when={
+          exhausted() &&
+          posts().length === 0 &&
+          queued().length === 0 &&
+          !loading()
+        }
+      >
         <p class="py-8 text-center text-sm text-secondary">
           Nothing here yet. Write something.
         </p>

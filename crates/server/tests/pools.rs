@@ -26,6 +26,8 @@ fn test_config(database_path: PathBuf) -> Config {
         cf_zone_id: None,
         cf_purge_token: None,
         cf_api_base: String::new(),
+        offsite_url: None,
+        offsite_auth: None,
     }
 }
 

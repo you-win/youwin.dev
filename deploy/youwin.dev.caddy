@@ -43,6 +43,19 @@ youwin.dev, www.youwin.dev {
 		file_server
 	}
 
+	# /random redirects to a different post on every request, so it is the
+	# one path on this site that must NOT be cached. The catch-all below
+	# stamps every proxied response with s-maxage=300, and `header` replaces
+	# rather than defers — so the origin's own `no-store` would be
+	# overwritten and the "random" link would return one fixed post for five
+	# minutes at every edge. Handling it separately is what preserves it.
+	#
+	# Caddy sorts sibling handle blocks by path specificity, so this beats
+	# the bare `handle` regardless of order. Exact path, no wildcard.
+	handle /random {
+		reverse_proxy 127.0.0.1:8080
+	}
+
 	# Everything else is server-rendered HTML. max-age is for the browser,
 	# s-maxage for Cloudflare — which ALSO needs a cache rule in the
 	# dashboard, since CF does not cache HTML by default. Without that rule

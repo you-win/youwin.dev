@@ -1,6 +1,6 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
 
-import { MOODS, type Mood, type Visibility } from "../lib/api";
+import { MOOD_LABEL, MOODS, type Mood, type Visibility } from "../lib/api";
 import type { Draft } from "./Familiar";
 
 /** Soft limit: the meter turns amber past this, but the post is still allowed. */
@@ -8,22 +8,6 @@ const SOFT_LIMIT = 500;
 
 /** Hard limit, mirroring the server's. Exceeding it disables posting. */
 const HARD_LIMIT = 4000;
-
-/**
- * Sentence case for the picker, since it sits beside "Public"/"Unlisted".
- *
- * Spelled out rather than capitalized in CSS: `text-transform` on `<option>` is
- * ignored by several browsers, and this is seven words.
- */
-const MOOD_LABEL: Record<Mood, string> = {
-  content: "Content",
-  contemplative: "Contemplative",
-  tired: "Tired",
-  excited: "Excited",
-  melancholy: "Melancholy",
-  chaos: "Chaos",
-  neutral: "Neutral",
-};
 
 interface Props {
   /** Resolves once the post is stored; rejects to leave the draft in place. */
@@ -48,10 +32,57 @@ interface Props {
    * knew about it could not also be the reply and edit box.
    */
   onDraftChange?: (draft: Draft) => void;
+  /**
+   * Where to keep unsent text across reloads. Absent means do not.
+   *
+   * Set on the composers whose contents exist nowhere else — the feed's box and
+   * a reply — so a swipe-away, a crashed tab, or an update prompt taken at the
+   * wrong moment does not take the text with it. Deliberately *not* set on the
+   * edit composer, whose starting text is already stored on the server: keeping
+   * a second copy there would mean an abandoned edit silently reappearing over
+   * the published post days later.
+   */
+  draftKey?: string;
+}
+
+/** Namespaced so a stored draft cannot collide with the outbox. */
+const DRAFT_PREFIX = "youwin.draft.";
+
+function loadDraft(key: string | undefined): string {
+  if (!key) return "";
+  try {
+    return localStorage.getItem(DRAFT_PREFIX + key) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Stores the text, or clears the entry when there is none.
+ *
+ * Clearing rather than storing `""` matters on the way out: an empty box should
+ * leave nothing behind, so the next reload restores an empty composer without
+ * having to distinguish "saved nothing" from "never saved".
+ */
+function saveDraft(key: string | undefined, body: string) {
+  if (!key) return;
+  try {
+    if (body) localStorage.setItem(DRAFT_PREFIX + key, body);
+    else localStorage.removeItem(DRAFT_PREFIX + key);
+  } catch {
+    // Private browsing or a full quota. The composer still works; it just does
+    // not survive a reload, which is where it was before this existed.
+  }
 }
 
 export default function Composer(props: Props) {
-  const [body, setBody] = createSignal(props.initialBody ?? "");
+  // An explicit `initialBody` wins over a stored draft: it is what the edit
+  // composer loads from the server, and there is no `draftKey` on that one
+  // anyway. Restoring happens once, at construction, so typing is never
+  // interrupted by something arriving late.
+  const [body, setBody] = createSignal(
+    props.initialBody ?? loadDraft(props.draftKey),
+  );
   const [visibility, setVisibility] = createSignal<Visibility>("public");
   const [mood, setMood] = createSignal<Mood | null>(props.initialMood ?? null);
   const [busy, setBusy] = createSignal(false);
@@ -69,6 +100,12 @@ export default function Composer(props: Props) {
       mood: mood(),
     }),
   );
+
+  // Every keystroke, not a debounce. The write is a few hundred bytes into
+  // localStorage and the thing being defended against is a tab that closes
+  // without warning — a 500ms window in which the last sentence is lost is the
+  // whole failure, reintroduced smaller.
+  createEffect(() => saveDraft(props.draftKey, body()));
 
   const count = () => [...body()].length;
   const overSoft = () => count() > SOFT_LIMIT;

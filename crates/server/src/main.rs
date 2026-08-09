@@ -7,7 +7,7 @@ use anyhow::{Context as _, Result, bail};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 use youwin_server::{
-    auth::password, backup, clock::now_millis, config, db, export, public, seed, write,
+    auth::password, backup, clock::now_millis, config, db, export, offsite, public, seed, write,
 };
 
 /// Identifies the build, for the smoke test the server runs before activating a
@@ -59,8 +59,9 @@ async fn main() -> Result<()> {
                 || cfg.database_path.with_file_name("export"),
                 std::path::PathBuf::from,
             );
+            let offsite = uploader(&cfg);
             with_db(cfg, move |db| {
-                Box::pin(async move { export::run(db, &dir).await })
+                Box::pin(async move { export::run(db, &dir, &offsite).await })
             })
             .await
         }
@@ -69,8 +70,9 @@ async fn main() -> Result<()> {
                 || cfg.database_path.with_file_name("backups"),
                 std::path::PathBuf::from,
             );
+            let offsite = uploader(&cfg);
             with_db(cfg, move |db| {
-                Box::pin(async move { backup::run(db, &dir).await })
+                Box::pin(async move { backup::run(db, &dir, &offsite).await })
             })
             .await
         }
@@ -92,6 +94,22 @@ async fn main() -> Result<()> {
              `rerender`, `hash-password`, `version`, or no argument to serve"
         ),
     }
+}
+
+/// The off-site destination for `backup` and `export`, or a disabled one.
+///
+/// Says which it got, because the whole failure mode worth guarding against here
+/// is a nightly timer that has been quietly keeping every copy on one disk. A
+/// line in the journal either way makes "is this actually leaving the box?"
+/// answerable without reading the unit file.
+fn uploader(cfg: &config::Config) -> offsite::Uploader {
+    let uploader = offsite::Uploader::new(cfg.offsite_url.as_deref(), cfg.offsite_auth.as_deref());
+
+    if !uploader.is_enabled() {
+        println!("Off-site upload is off (YOUWIN_OFFSITE_URL is not set); keeping local copies only.");
+    }
+
+    uploader
 }
 
 /// Opens the database, runs `body`, and closes the pools whether or not it

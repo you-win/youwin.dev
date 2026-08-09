@@ -47,6 +47,16 @@ pub struct Config {
     /// Cloudflare's API root. Overridable only so the purge request can be
     /// pointed at a local stub and inspected; nothing in production sets it.
     pub cf_api_base: String,
+
+    /// Where `backup` and `export` send a copy of what they wrote, so that the
+    /// disk holding the database is not also the only disk holding its backups.
+    ///
+    /// Off unless a URL is set, and off is supported: local dated snapshots are
+    /// still taken either way. `offsite_auth` is a complete `Authorization`
+    /// header value — see [`crate::offsite`] — and is optional, because some
+    /// targets authenticate through the URL instead.
+    pub offsite_url: Option<String>,
+    pub offsite_auth: Option<String>,
 }
 
 impl Config {
@@ -63,6 +73,8 @@ impl Config {
             cf_zone_id: optional_env("YOUWIN_CF_ZONE_ID"),
             cf_purge_token: optional_env("YOUWIN_CF_PURGE_TOKEN"),
             cf_api_base: env_or("YOUWIN_CF_API_BASE", ""),
+            offsite_url: optional_env("YOUWIN_OFFSITE_URL"),
+            offsite_auth: optional_env("YOUWIN_OFFSITE_AUTH"),
         })
     }
 }

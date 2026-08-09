@@ -2,6 +2,7 @@ import { useNavigate } from "@solidjs/router";
 import { createSignal, Show } from "solid-js";
 
 import { api, ApiError } from "../lib/api";
+import { flush } from "../lib/outbox";
 import { loadSession } from "../lib/session";
 
 export default function Login() {
@@ -19,6 +20,10 @@ export default function Login() {
     try {
       await api.login(password());
       await loadSession();
+      // Anything queued while the session was expired can go out now. Not
+      // awaited — the feed is what you asked for, and the outbox shows its own
+      // progress there.
+      void flush();
       navigate("/", { replace: true });
     } catch (e) {
       // The server refuses a correct password while throttled, so say so

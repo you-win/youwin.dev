@@ -99,7 +99,20 @@ pub struct CreateRequest {
     /// infer one from the text.
     #[serde(default)]
     mood: Option<Mood>,
+    /// Makes this request safe to retry. Set by the composer's outbox when a
+    /// post was written offline; absent for anything posted normally, where
+    /// there is nothing to retry.
+    #[serde(default)]
+    idempotency_key: Option<String>,
 }
+
+/// Longest idempotency key accepted.
+///
+/// The client sends a UUID, so 36. This is not a security boundary — a caller
+/// who can reach this route can already post — it is a bound on a value that
+/// goes into a unique index, so a client bug cannot fill that index with
+/// megabyte keys.
+const MAX_KEY_CHARS: usize = 64;
 
 fn default_visibility() -> Visibility {
     Visibility::Public
@@ -246,19 +259,51 @@ pub async fn create(
         None => None,
     };
 
-    let post = posts::insert(
-        &state.db.write,
-        &body.body,
-        parent_id,
-        body.visibility,
-        body.mood,
-        now_millis(),
-    )
-    .await?;
+    let key = match body.idempotency_key.as_deref().map(str::trim) {
+        Some("") | None => None,
+        Some(key) if key.chars().count() > MAX_KEY_CHARS => {
+            return Err(AppError::Invalid("That idempotency key is too long."));
+        }
+        Some(key) => Some(key),
+    };
 
-    tracing::info!(id = %post.public_id, visibility = post.visibility.as_str(), "created post");
-    state.purger.purge_everything();
-    state.familiar.forget();
+    let (post, created) = match key {
+        Some(key) => {
+            posts::insert_once(
+                &state.db.write,
+                key,
+                &body.body,
+                parent_id,
+                body.visibility,
+                body.mood,
+                now_millis(),
+            )
+            .await?
+        }
+        None => (
+            posts::insert(
+                &state.db.write,
+                &body.body,
+                parent_id,
+                body.visibility,
+                body.mood,
+                now_millis(),
+            )
+            .await?,
+            true,
+        ),
+    };
+
+    // A replay wrote nothing, so there is nothing to invalidate and nothing the
+    // pet has not already seen. Purging anyway would be harmless but dishonest
+    // in the log, which is the only place either of these is visible.
+    if created {
+        tracing::info!(id = %post.public_id, visibility = post.visibility.as_str(), "created post");
+        state.purger.purge_everything();
+        state.familiar.forget();
+    } else {
+        tracing::info!(id = %post.public_id, "replayed a queued post; nothing written");
+    }
 
     // Re-read so the response carries reply_count and the stored body, matching
     // exactly what a subsequent fetch would return.
@@ -266,7 +311,15 @@ pub async fn create(
         .await?
         .ok_or(AppError::NotFound)?;
 
-    Ok((StatusCode::CREATED, Json(PostDto::from(&row))))
+    // 200 rather than 201 on a replay: nothing was created, and the flush that
+    // sent it is entitled to know its earlier attempt had already landed.
+    let status = if created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+
+    Ok((status, Json(PostDto::from(&row))))
 }
 
 pub async fn update(

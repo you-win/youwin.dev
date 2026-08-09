@@ -74,7 +74,8 @@ nothing. In dev, Vite proxies `/api` to `127.0.0.1:8081` so cookies behave as in
 youwin.dev/
 ├─ Cargo.toml
 ├─ crates/server/
-│  ├─ migrations/             # 0001_init, 0002_search_and_tags, 0003_post_mood — no CLI
+│  ├─ migrations/             # 0001_init, 0002_search_and_tags, 0003_post_mood,
+│  │                          # 0004_idempotency — no CLI
 │  ├─ tests/                  # one per statement in db/, plus the router integration tests
 │  └─ src/
 │     ├─ lib.rs               # the crate proper — a lib so tests can reach the modules
@@ -83,11 +84,13 @@ youwin.dev/
 │     ├─ seed.rs              # `youwin-server seed` — dev rows via the real pipeline
 │     ├─ export.rs            # `export` — posts.json + a markdown tree           (M5)
 │     ├─ backup.rs            # `backup` — VACUUM INTO, dated, 30 kept            (M5)
+│     ├─ offsite.rs           # one PUT per artifact, off unless configured       (M9)
 │     ├─ cache.rs             # Cloudflare purge-on-write, off unless configured  (M5)
 │     ├─ tag.rs               # canonical form + href — shared by render, db, view (M5)
 │     ├─ mood.rs              # the seven moods — shared by db, API, export, pet  (M7)
+│     ├─ calendar.rs          # months and days — URL, query range, page heading  (M9)
 │     ├─ url.rs               # percent-encoding for tag paths and ?q=            (M5)
-│     ├─ db/{mod,posts,sessions,search,tags,familiar}.rs  # pools + every statement
+│     ├─ db/{mod,posts,sessions,search,tags,familiar,archive}.rs  # pools + every statement
 │     ├─ auth/{mod,password,session,middleware,ratelimit}.rs
 │     ├─ familiar/            # the pet — pure state machine, no schema         (M6)
 │     │  ├─ mod.rs            # the five dimensions + compute()
@@ -104,7 +107,7 @@ youwin.dev/
 │     │  └─ view/             # maud: layout, pages, post, atom, time_fmt, familiar
 │     ├─ write/               # write.youwin.dev :8081
 │     │  ├─ mod.rs            # Router — read + write pools
-│     │  └─ routes/{auth,posts,preview}.rs
+│     │  └─ routes/{auth,posts,preview,familiar,moods}.rs
 │     ├─ render/markdown.rs   # markdown → html + text + tags, in one pass
 │     └─ error.rs             # AppError → IntoResponse
 ├─ web/                       # pnpm; builds BOTH stylesheets and the SPA
@@ -113,9 +116,9 @@ youwin.dev/
 │     ├─ theme.css            # mistwood tokens — single source of truth, imported by both
 │     ├─ public.css           # tailwind + theme, no DaisyUI → the public site
 │     ├─ app.css              # tailwind + DaisyUI + theme → the SPA
-│     ├─ lib/{api,session,pwa}.ts
-│     ├─ routes/{Feed,Permalink,Login,Drafts,Search,Settings}.tsx
-│     └─ components/{Composer,PostCard}.tsx
+│     ├─ lib/{api,session,pwa,outbox}.ts
+│     ├─ routes/{Feed,Permalink,Login,Drafts,Search,Settings,Moods}.tsx
+│     └─ components/{Composer,PostCard,Familiar}.tsx
 ├─ .github/workflows/
 │  └─ deploy.yml              # build, test, ship, activate — the normal path
 └─ deploy/
@@ -146,6 +149,7 @@ CREATE TABLE posts (
   mood        TEXT                           -- M7; NULL is "did not say", not neutral
                 CHECK (mood IS NULL OR mood IN ('content','contemplative','tired',
                        'excited','melancholy','chaos','neutral')),
+  idempotency_key TEXT,                      -- M9; set only by the offline outbox
   created_at  INTEGER NOT NULL,              -- unix millis, UTC
   updated_at  INTEGER NOT NULL,
   edited_at   INTEGER,                       -- null until the body changes post-publish
@@ -155,6 +159,12 @@ CREATE TABLE posts (
 CREATE INDEX idx_posts_feed   ON posts (created_at DESC, id DESC) WHERE deleted_at IS NULL;
 CREATE INDEX idx_posts_root   ON posts (root_id, created_at)      WHERE deleted_at IS NULL;
 CREATE INDEX idx_posts_parent ON posts (parent_id)                WHERE deleted_at IS NULL;
+
+-- M9. Partial not as an optimization but because SQLite's ALTER TABLE ADD COLUMN
+-- refuses UNIQUE outright. Any number of NULLs is exactly the semantics wanted:
+-- "no key" is not a value that can collide.
+CREATE UNIQUE INDEX idx_posts_idempotency ON posts (idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
 
 CREATE TABLE sessions (
   token_hash   BLOB    PRIMARY KEY,          -- SHA-256 of the cookie value, never the value
@@ -355,6 +365,11 @@ GET  /p/:public_id        permalink — the post plus its whole thread
 GET  /search?q=           full-text search                                (M5)
 GET  /t/:tag              everything carrying one hashtag                 (M5)
 GET  /tags                every tag in use, most-used first               (M5)
+GET  /archive             every month that has posts, under its year      (M9)
+GET  /archive/:year       302 → /archive#y:year — a truncated URL         (M9)
+GET  /archive/:year/:mon  one calendar month                              (M9)
+GET  /on/:month/:day      that day of the year, in every year             (M9)
+GET  /random              302 → a public permalink, no-store              (M9)
 GET  /about
 GET  /familiar            the pet, at full size, with its character sheet      (M6)
                           (the authoring host has its own pair — see M8)
@@ -453,6 +468,50 @@ The call is spawned and never awaited: the write has already committed, so no ou
 should turn a successful post into an error. A failure is logged and the TTL takes over.
 The cost of all this is `reqwest` + `rustls` — about 28 crates on a binary that otherwise
 makes no outbound connections, which is the honest reason this stayed optional for so long.
+
+### The date spine (M9)
+
+The feed pages by cursor, search needs a word, and a tag needs to have been written. None
+of those answers *when*, which the search design itself argues is the strongest remaining
+clue in a personal archive. `/archive` is the spine: every month that has posts, grouped
+under its year, on one page — twelve rows a year, so the complete thing stays small for
+decades, and complete is the property worth having.
+
+**A month is a millisecond range, not a date function.** `calendar::YearMonth::bounds`
+computes `[start, end)` in Rust and the query is `created_at >= ?1 AND created_at < ?2`,
+which stays on `idx_posts_feed`. A `strftime` in the predicate would be opaque to the
+planner and turn every month page into a full scan. Half-open rather than an inclusive
+end because the alternative is "the last millisecond of the month" — a value somebody
+eventually computes as 23:59:59.000 and loses a post to.
+
+**`/on/:month/:day` is the opposite case and pays a scan for it.** A day of the year is
+not contiguous — it is one day out of every year — so it compares
+`strftime('%m-%d', …)` and no index can help. That is deliberate: it is a few thousand
+rows behind the same five-minute edge cache as everything else, and the alternative is a
+generated column plus an index to speed up a page nobody visits in a loop.
+
+**The two pages 404 on opposite rules, and the difference is the crawler.** A month with
+nothing in it is a 404, for the same reason an unused tag is: without it, every month of
+every year is a valid URL and the archive becomes an unbounded space of empty pages. A
+*day* with nothing on it is a 200, because there are 366 of them and no more — a bounded
+space cannot be walked into an unbounded one, and "nothing on this day yet" is a true
+answer that becomes false by itself. An impossible day (31 April) is still a 404;
+29 February is not, and is validated against a leap year so it works in the years it
+matters.
+
+`/archive/:year` is a 302 to that year's section rather than a page. The index already
+lists every month of every year, so a year page would be the same content under a second
+URL — but a truncated URL is a thing people type, and answering it beats a 404.
+Temporary rather than permanent: a 308 is cached by browsers effectively forever, and
+this is a judgement about page structure rather than a fact about the URL.
+
+**`/random` is the one path on the site that must not be cached.** Caddy sets
+`Cache-Control` on everything it proxies and `header` replaces rather than defers, so the
+origin's `no-store` only survives because the site block handles `/random` separately.
+Without that, the "random" link returns one fixed post for five minutes at every edge —
+a bug that looks exactly like working. On an empty archive it redirects to the feed
+rather than 404ing: the URL is not broken, it just has nothing to offer yet, and the feed
+says so in words.
 
 ## The Familiar (M6)
 
@@ -608,7 +667,9 @@ GET    /api/feed?cursor=&limit=20     ALL visibilities, flagged
 GET    /api/posts/:public_id          post + thread
 GET    /api/drafts
 GET    /api/search?q=&cursor=         ALL visibilities, drafts included    (M5)
-POST   /api/posts         {body, parent_public_id?, visibility, mood?}
+GET    /api/moods                     per-month counts per mood            (M9)
+POST   /api/posts         {body, parent_public_id?, visibility, mood?,
+                           idempotency_key?}   the key makes it retryable   (M9)
 PATCH  /api/posts/:id     {body?, visibility?, mood?}   mood: absent leaves, null clears
 DELETE /api/posts/:id                 sets deleted_at
 
@@ -729,6 +790,42 @@ per-request HTML on this origin.
   `warning` past the soft limit. Posting inserts optimistically and rolls back on error.
 - A "preview" affordance opens `/preview/:id` — the real public rendering, not a mimic.
 
+### The mood timeline (M9)
+
+`/moods` is the first thing other than the pet to read `posts.mood`. The field is
+collected on every post and spent on a kaomoji; this hands it back to the person filling
+it in. It stays on the authoring host — mood never renders on youwin.dev, and that is a
+rule rather than an omission, so a public chart of it would be the disclosure the rule
+exists to prevent. It counts every visibility including drafts: a draft was still written
+in a mood, and this answers a question about the writer rather than about the archive.
+
+**Eight small charts, not one stacked bar.** The stack was the obvious form and it is not
+safe here. Stacked segments are told apart by colour where they touch, and a month with
+no `excited` posts puts non-adjacent slots against each other — so *every* pair has to
+separate, not just the neighbours. Seven categorical hues cannot do that: measured under
+simulated deuteranopia, `tired` and `melancholy` land **1.6** apart on a scale where 8 is
+the target and 6 the floor. They are the same colour to a red-green colourblind reader.
+Faceting into one single-series row per mood removes the problem instead of mitigating
+it — a row is one hue throughout, so no two hues ever touch — and it answers the question
+a timeline is actually asked ("has this shifted?") better than a stack does.
+
+The seven hues were validated against this app's own card colour rather than assumed:
+lightness band, chroma floor, adjacent-pair separation under simulated protanopia and
+deuteranopia, and 3:1 contrast all pass at `base-200`. Only a dark set exists, because
+`theme.css` sets `color-scheme: dark` and mistwood has no light mode to step a second one
+for.
+
+**"Did not say" gets no hue.** It is the absence of a pick — what the familiar reads as
+permission to infer — so it wears the muted ink and sits below a rule, apart from the
+seven. A categorical colour would make it look like a choice somebody made. Cells are
+*shares* of their month rather than counts, because most posts have no mood and an
+absolute scale would flatten the other seven into nothing.
+
+The exact counts live in a table behind a toggle, the row totals are the only numbers on
+the chart itself, and each row carries an `aria-label` naming its total and its peak
+month. The 24-month cap is stated on the page when it bites — a chart quietly showing two
+years of a five-year archive is worse than one that says so.
+
 ## PWA
 
 `vite-plugin-pwa` (`generateSW`). `display: standalone`, `theme_color` matching
@@ -781,6 +878,49 @@ Four things that cost real time to find, all verified against `pnpm run preview`
   server-confirmed session in `localStorage`. That fallback is safe because the only way to
   have one is to have signed in on this device, and signing out clears it alongside the
   cache.
+
+### Offline composing (M9)
+
+The offline *feed* worked from M4; writing did not. The composer surfaced an error and
+kept the text in the box, which is honest and means a post written underground exists
+only for as long as you leave that tab alone. Now it is queued in `localStorage` and sent
+when the connection returns.
+
+**A flush is a retry, and a retry needs an idempotency key.** Over a dying link there is
+no way to tell "the request never arrived" from "the reply never came back", so without
+one the honest choices are posting twice or losing the post. `0004` adds a nullable
+`idempotency_key` and a **partial unique index** — partial not as an optimization but
+because SQLite's `ALTER TABLE ADD COLUMN` refuses `UNIQUE` outright. The client generates
+a UUID once, when the post is queued, and sends the same one on every attempt; the server
+returns the post the first attempt wrote, with `200` rather than `201`.
+
+The check and the insert share one transaction, and the write pool is a single
+connection, so two simultaneous flushes serialize rather than racing. Doing the lookup in
+the handler instead would leave a window where both miss and the second gets a constraint
+violation — a 500 for a request that was correct.
+
+**The key is spent the moment it writes a row, deleted or not.** `BY_IDEMPOTENCY_KEY`
+deliberately omits `deleted_at IS NULL`: delete a post on one device while another still
+has it queued, and the replay must find the deleted row rather than writing a fresh one.
+Soft deletion is what makes that work at all.
+
+**Retry only on a failure that was never an answer.** A `NetworkError`, a 401 (the
+session expired while it sat in the queue — not a rejection), and 502/503/504 from a
+proxy in front of a restarting origin all leave the post queued. Anything the server
+actually answered leaves the queue, because repeating it would turn one bad post into a
+permanent loop. 500 is deliberately *not* retryable: that one reached the application.
+
+**Nothing is dropped silently.** A refused post keeps its full text and moves to a
+rejected list shown on the feed with the reason, a copy button, and a discard button.
+Losing writing is the one failure this application cannot have — which is also why the
+composer now persists its text on every keystroke, under a per-composer key. The edit
+composer deliberately has none: its starting text is already on the server, and a stored
+copy would mean an abandoned edit reappearing over the published post days later.
+
+Background Sync would let the worker flush with the app closed, but `generateSW` cannot
+register a sync handler without switching to `injectManifest` and hand-writing the worker.
+For a queue that exists to survive a train tunnel, "sends when you next open it" is the
+same outcome.
 
 ## Theme — "mistwood"
 
@@ -1002,6 +1142,47 @@ nightly, insuring against different failures:
   the database) plus a markdown tree with front matter. The real insurance policy: readable
   in ten years with no SQLite, no Rust, and no memory of how any of this worked.
 
+### Off-site backup (M9)
+
+Both of the above write to `/var/backups/youwin` — the same disk as the database they
+protect. That covers a bad write, a bad migration, and a deletion regretted a week later.
+It does not cover the disk, the machine, or the account, and that is the failure that
+takes everything at once. Setting `YOUWIN_OFFSITE_URL` makes each nightly run also `PUT`
+the dated `.db` and a dated copy of `posts.json`.
+
+**A plain `PUT`, not an SDK.** The target is whatever answers `PUT {base}/{name}` with an
+optional `Authorization` header — a Storage Box, rsync.net, Nextcloud, an S3 gateway, a
+WebDAV server, an nginx with `dav_methods`. That covers every cheap off-site option worth
+having with no provider SDK, no signing algorithm, and no credential format this program
+has to understand. `reqwest` is already here for the cache purge, so the feature costs no
+new crates. `YOUWIN_OFFSITE_AUTH` is a *complete header value* rather than a token plus a
+scheme setting, which would be a second thing to configure that can only ever be wrong.
+
+**Configured through the existing `EnvironmentFile`, not a new config file.** Systemd
+already reads `/etc/youwin/secrets.env` at 0600, which is "read a file at startup" with
+somebody else doing the parsing — so the binary grows no config format for two values,
+and they sit beside the other two secrets for the reason that unit file already gives:
+a deploy reinstalls the unit and would take a hand-edited value with it.
+
+**Failures are loud, unlike the cache purge.** The purge is spawned and ignored because
+the write it follows has already committed; an upload that did not happen is the exact
+thing this exists to prevent. It propagates, the subcommand exits non-zero, and the unit
+goes to `failed` — a nightly timer that exits zero having uploaded nothing looks exactly
+like one that worked.
+
+Only `posts.json` goes off-site from the export, not the markdown tree: everything in the
+tree is derivable from that file, and sending a directory means either a tar dependency
+or one request per post. It goes *dated*, unlike the local copy, because the local
+directory is refreshed in place — right for a working export, wrong for the copy that has
+to survive a bad run overwriting it.
+
+**This changed the backup unit's hardening, and the comment had to change with it.** It
+was `RestrictAddressFamilies=AF_UNIX` under "no network at all: this reads a file and
+writes files". That is no longer true. A hardening line whose comment describes the old
+behaviour is worse than a looser one that is honest, so both were rewritten rather than
+just the directive. Retention off-site is the remote's job; this never deletes anything
+it did not just write.
+
 **`youwin-server rerender`** rebuilds `body_html`, `body_text` and the tag rows from `body`,
 which is the authority. Needed whenever the renderer changes — M5 is exactly that case, and
 hashtags in existing posts are neither linked nor indexed until it runs. It deliberately
@@ -1015,27 +1196,31 @@ simply finishes.
 | | | |
 |---|---|---|
 | **M0** | Skeleton | ✅ **Done.** Zola tree deleted. Workspace, config, the two pools, `sqlx::migrate!()` on boot (schema landed here — `migrate!()` wants a real migration), two listeners with health checks, `tests/pools.rs`. `theme.css` split into `public.css` + `app.css` |
-| **M1** | **The entire public site** | ✅ **Done.** `youwin-server seed`, maud templates, feed + cursor pagination, permalinks, threads, Atom, markdown pipeline, asset-manifest lookup, themed 404. 26 tests green, covering every statement in `db/`. *Still to do before it is actually live: put the Caddy block and the Cloudflare cache rule on the box, alongside M2.* |
-| **M2** | Auth | ✅ **Code done.** `hash-password`, login, sessions, structural guard, throttling, Origin check. 61 tests green. Deploy artifacts written to [`deploy/`](deploy/README.md) — **installing them on the server is still outstanding**, including the Cloudflare cache rule without which M1's caching headers are inert |
+| **M1** | **The entire public site** | ✅ **Done.** `youwin-server seed`, maud templates, feed + cursor pagination, permalinks, threads, Atom, markdown pipeline, asset-manifest lookup, themed 404. 26 tests green, covering every statement in `db/` |
+| **M2** | Auth | ✅ **Done.** `hash-password`, login, sessions, structural guard, throttling, Origin check. 61 tests green. Deploy artifacts in [`deploy/`](deploy/README.md), installed and running |
 | **M3** | Authoring app | ✅ **Done.** Solid SPA — composer with optimistic insert, inline edit, create/edit/soft-delete, drafts, replies, `/preview/:id` through the public templates. 81 tests green |
 | **M4** | PWA | ✅ **Done.** Generated icons, manifest, service worker, offline feed, update prompt, install prompt, share sheet. Offline verified against `pnpm run preview` with every server stopped |
 | **M5** | Polish | ✅ **Done.** FTS5 search on both surfaces, hashtags with `/t/:tag` and `/tags`, `export`, `backup` + nightly timer, `rerender`, Cloudflare purge-on-write (off unless configured). 114 tests green |
 | **M6** | The Familiar | ✅ **Done.** The whole state machine — topics, mood, energy decay and bursts, learned circadian phase, growth stages, pose triggers — plus compositional kaomoji rendering, the character sheet, and the five-minute snapshot. On the feed and at `/familiar`. 178 tests green |
 | **M7** | Mood as a field | ✅ **Done.** `posts.mood`, a picker in the composer, and `0003` backfilling the hashtags that used to carry it. Hashtags are ordinary tags again; keyword inference stays as the fallback for a post with nothing picked. 190 tests green |
 | **M8** | A familiar worth coming back to | 🚧 **In progress.** [`familiar-design.md`](familiar-design.md) is the spec, rewritten against the code and no longer a dangling reference. `familiar::baseline` landed first: sittings instead of posts, quantiles instead of means, and a decay half-life derived from the writer's own gap distribution — which fixes a pet that read every bursty writer as an absent one. Then the composer: `GET /api/familiar`, `POST /api/familiar/draft`, and a pet above the box that changes as you type. Then speech — one line, picked as the least likely true thing about the archive, in the pet's own voice on all three surfaces, and silence on an ordinary day. Then sparks — the pet's first transient: milestones that last a window instead of a single post, and a visible welcome back from a real absence. Then traits — the slow channel, and two of the three the spec asked for turned out to have been built already by the baseline and the phase profile, so what landed is the two places the pet was still one-size-fits-all: what one post is worth, and whether its hours mean anything. Still to come, in order: a diet-shift line, the chronicle, anticipation. 278 tests green |
+| **M9** | Ways back in, and out | ✅ **Done.** Five things the archive wanted once it was a year old rather than a week: the [date spine](#the-date-spine-m9) (`/archive`, `/archive/:year/:month`, `/on/:month/:day`) and `/random`; [off-site backup](#off-site-backup-m9) for `backup` and `export`, off unless configured; [offline composing](#offline-composing-m9) — an idempotency key on `POST /api/posts` (`0004`), a queue for posts written with no signal, and composer drafts that survive a reload; and a [mood timeline](#the-mood-timeline-m9) at `/moods`, which is the first thing to read `posts.mood` other than the pet. 323 tests green |
 
 The split changes the shape of the plan more than anything else: **M1 ships a complete,
 finished artifact** — a public archive at `youwin.dev` that works and is done — rather
 than half of a surface that needs auth before it means anything. Writing happens over SSH
 and `INSERT` until M3, which is a perfectly good way to run a blog for a few weeks.
 
-**Still outstanding, and not a code task:** none of this is on the server yet. Routine
-deploys are automated end to end, but the one-time setup is not and cannot be — users and
-directories, `activate-youwin` and its sudoers rule, the systemd units, the Caddy blocks,
-the password hash, the CI deploy key, and the one that is easy to skip and silently inert,
-the **Cloudflare cache rule**, without which M1's `s-maxage` header does nothing at all.
-See [`deploy/README.md`](deploy/README.md). After the first M5 deploy, run
-`youwin-server rerender` once so existing posts pick up hashtag links.
+**It is deployed and has been running well.** The one-time provisioning that CI cannot
+do — users and directories, `activate-youwin` and its sudoers rule, the systemd units,
+the Caddy blocks, the password hash, the CI deploy key, and the Cloudflare cache rule
+without which M1's `s-maxage` header is inert — is done, and
+[`deploy/README.md`](deploy/README.md) is the record of it rather than a plan.
+Routine deploys are a push to `master`.
+
+Two things are still worth knowing about a *fresh* install rather than this one: run
+`youwin-server rerender` once after any renderer change, and set `YOUWIN_OFFSITE_URL`
+(M9) or the nightly backup keeps every copy on the disk it is protecting.
 
 ## Deliberately not in v1
 

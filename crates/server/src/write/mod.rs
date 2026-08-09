@@ -104,6 +104,10 @@ pub fn router(
         )
         .route("/api/drafts", get(routes::posts::drafts))
         .route("/api/search", get(routes::posts::search))
+        // Mood, handed back to the person who records it. Authoring host only:
+        // it never renders on youwin.dev, and that is a rule rather than an
+        // omission.
+        .route("/api/moods", get(routes::moods::show))
         .route("/api/familiar", get(routes::familiar::show))
         // POST because a draft is too long for a query string, not because
         // anything is created. Nothing here writes.

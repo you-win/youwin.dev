@@ -3,7 +3,9 @@
 use maud::{Markup, html};
 
 use crate::{
+    calendar::{MonthDay, YearMonth},
     db::{
+        archive::MonthCount,
         posts::{Cursor, FeedRow, Post},
         search,
         tags::TagCount,
@@ -250,6 +252,187 @@ pub fn tag_index(assets: &Assets, origin: &str, all: &[TagCount]) -> Markup {
                 }
             }
         }
+    };
+
+    super::layout::render(assets, &page, content)
+}
+
+/// A month chip, shared by the archive index and nothing else yet.
+///
+/// Deliberately the same shape as a tag chip: both are "a bounded set of links
+/// with a count", and a reader who has used one has used the other.
+fn month_chip(month: YearMonth, posts: i64) -> Markup {
+    html! {
+        li {
+            a href=(month.href())
+              class="inline-flex items-baseline rounded-box border border-base-300 \
+                     bg-base-200 px-3 py-1.5 text-sm no-underline hover:border-primary/50" {
+                span { (month.month_label()) }
+                // A real space, not a flex gap — see `tag_index`, which learned
+                // this the same way.
+                span class="text-secondary" { " " (posts) }
+            }
+        }
+    }
+}
+
+/// The spine: every month that has posts, grouped under its year.
+///
+/// One page rather than a year index that leads to a month index. A personal
+/// archive gains twelve rows a year, so the complete thing stays small for
+/// decades — and complete is the property worth having here, since the whole
+/// reason this page exists is that the feed's cursor pagination cannot answer
+/// "what was I writing three years ago" without twenty clicks.
+///
+/// `today` is what the "on this day" link points at, so the one view that needs
+/// no navigation to be useful has somewhere to be found from.
+pub fn archive_index(
+    assets: &Assets,
+    origin: &str,
+    months: &[MonthCount],
+    today: MonthDay,
+) -> Markup {
+    let page = super::layout::Page::new(
+        "Archive — youwin.dev",
+        "Every month of youwin.dev, by year.",
+        format!("{origin}/archive"),
+    );
+
+    // The query returns months newest-first, so consecutive rows of the same
+    // year are already adjacent — grouping is a fold, not a sort. A row whose
+    // key will not parse is dropped rather than rendered as a broken link;
+    // `strftime` cannot produce one, so this is a guard, not a case.
+    let mut years: Vec<(i32, Vec<(YearMonth, i64)>)> = Vec::new();
+    for entry in months {
+        let Some(month) = YearMonth::from_key(&entry.month) else {
+            continue;
+        };
+        match years.last_mut() {
+            Some((year, list)) if *year == month.year => list.push((month, entry.posts)),
+            _ => years.push((month.year, vec![(month, entry.posts)])),
+        }
+    }
+
+    let content = html! {
+        div class="mb-6 flex flex-wrap items-baseline justify-between gap-2" {
+            h1 class="text-lg font-medium" { "Archive" }
+            a href=(today.href()) class="text-sm text-secondary" {
+                "every " (today.label()) " →"
+            }
+        }
+
+        @if years.is_empty() {
+            p class="text-secondary" { "Nothing written yet." }
+        } @else {
+            div class="flex flex-col gap-6" {
+                @for (year, list) in &years {
+                    // The anchor `/archive/{year}` redirects to. A truncated URL
+                    // lands on the year it named rather than the top of the page.
+                    section id=(format!("y{year}")) {
+                        h2 class="mb-2 text-sm text-secondary" { (year) }
+                        ul class="flex flex-wrap gap-2" {
+                            @for (month, posts) in list { (month_chip(*month, *posts)) }
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    super::layout::render(assets, &page, content)
+}
+
+/// One calendar month.
+pub fn archive_month(
+    assets: &Assets,
+    origin: &str,
+    month: YearMonth,
+    rows: &[FeedRow],
+    older: Option<Cursor>,
+    is_first_page: bool,
+) -> Markup {
+    let label = month.label();
+    let href = month.href();
+    let title = format!("{label} — youwin.dev");
+    let description = format!("Posts from {label}.");
+
+    let mut page = super::layout::Page::new(
+        &title,
+        &description,
+        // The padded path, so `/archive/2026/8` and `/archive/2026/08` are one
+        // page rather than two with the same content.
+        format!("{origin}{href}"),
+    );
+    page.noindex = !is_first_page;
+
+    let content = html! {
+        div class="mb-6 flex items-baseline justify-between" {
+            h1 class="text-lg font-medium" { (label) }
+            a href="/archive" class="text-sm text-secondary" { "all months" }
+        }
+
+        div class="flex flex-col gap-4" {
+            @for row in rows { (post::feed_item(row)) }
+        }
+
+        (pager(
+            &href,
+            older.map(|c| format!("{href}?before={}", c.encode())),
+            is_first_page,
+        ))
+    };
+
+    super::layout::render(assets, &page, content)
+}
+
+/// One day of the year, across every year the archive covers.
+///
+/// Unlike a month, this page is worth serving empty: there are 366 of them and
+/// no more, so it is not a space a crawler can walk into an unbounded set of
+/// thin pages — which is the reason an unused *tag* is a 404. "Nothing on this
+/// day yet" is also a true and stable answer that becomes false by itself.
+pub fn on_this_day(
+    assets: &Assets,
+    origin: &str,
+    day: MonthDay,
+    rows: &[FeedRow],
+    older: Option<Cursor>,
+    is_first_page: bool,
+) -> Markup {
+    let label = day.label();
+    let href = day.href();
+    let title = format!("{label} — youwin.dev");
+    let description = format!("Everything written on {label}, in any year.");
+
+    let mut page = super::layout::Page::new(&title, &description, format!("{origin}{href}"));
+    page.noindex = !is_first_page || rows.is_empty();
+
+    let content = html! {
+        div class="mb-6 flex items-baseline justify-between" {
+            h1 class="text-lg font-medium" { (label) }
+            a href="/archive" class="text-sm text-secondary" { "archive" }
+        }
+
+        @if rows.is_empty() {
+            p class="text-secondary" {
+                "Nothing written on " (label) " — yet."
+            }
+        } @else {
+            @if is_first_page {
+                p class="mb-4 text-sm text-secondary" {
+                    "Every " (label) ", newest first."
+                }
+            }
+            div class="flex flex-col gap-4" {
+                @for row in rows { (post::feed_item(row)) }
+            }
+        }
+
+        (pager(
+            &href,
+            older.map(|c| format!("{href}?before={}", c.encode())),
+            is_first_page,
+        ))
     };
 
     super::layout::render(assets, &page, content)

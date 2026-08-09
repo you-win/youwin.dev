@@ -50,7 +50,7 @@ One directory per site under `/srv/sites`, named for the domain — the same sha
 
 /var/lib/youwin/youwin.db    never touched by a deploy
 /var/backups/youwin/         nightly backup + export
-/etc/youwin/secrets.env      password hash, and the purge token if used
+/etc/youwin/secrets.env      password hash, purge token, off-site URL — if used
 ```
 
 `current` is what the systemd unit and the Caddy roots point at, so the binary
@@ -445,6 +445,10 @@ sudo systemctl start youwin-backup.service   # take one now rather than waiting
 sudo systemctl status youwin-backup.service  # oneshot: confirm it exited 0
 ```
 
+This writes to `/var/backups/youwin` — the same disk as the database. See
+[Off-site copies](#off-site-copies) for the half that makes it a backup rather
+than a second copy; it is optional and configured in the same `secrets.env`.
+
 **11. [optional] Cache purging on write**
 
 Skip this and the site runs on the `s-maxage` TTL alone, which is correct — an
@@ -785,10 +789,53 @@ Removing the sidecars matters: they belong to the database you replaced, and
 leaving them beside a different file is how you corrupt the one you just
 restored.
 
-### Pulling a copy down
+### Off-site copies
 
 A backup that only exists on the same disk as the thing it backs up is not one.
-From WSL:
+Set `YOUWIN_OFFSITE_URL` and each nightly run also uploads two files:
+
+| | |
+|---|---|
+| `youwin-YYYY-MM-DD.db` | the `VACUUM INTO` snapshot — what you restore from |
+| `youwin-YYYY-MM-DD.json` | the same `posts.json`, dated — readable with no SQLite and no toolchain |
+
+The markdown tree stays local: every line of it is derivable from that JSON, and
+sending a directory would mean either a tar dependency or one request per post.
+
+It is a plain `PUT` to `{YOUWIN_OFFSITE_URL}/{filename}` with an optional
+`Authorization` header, so the target can be a Storage Box, rsync.net,
+Nextcloud, an S3 gateway, a WebDAV server, or an nginx with `dav_methods` — no
+provider SDK and no signing algorithm. Both values go in the same file the other
+secrets do, because a deploy reinstalls the unit and would take a hand-edited
+value with it:
+
+```bash
+sudo tee -a /etc/youwin/secrets.env >/dev/null <<'EOF'
+YOUWIN_OFFSITE_URL=https://u123456.your-storagebox.de/youwin
+YOUWIN_OFFSITE_AUTH=Basic <base64 of user:password>
+EOF
+
+sudo systemctl start youwin-backup.service
+journalctl -u youwin-backup.service -n 20    # expect two "Uploaded …" lines
+```
+
+`YOUWIN_OFFSITE_AUTH` is a **complete header value** — `Bearer …`, `Basic …`,
+whatever the target wants — rather than a token plus a scheme setting, which
+would be a second thing to configure that can only ever be wrong. Omit it
+entirely for a target that authenticates through the URL itself.
+
+**A failed upload fails the unit**, unlike the cache purge, which is fire and
+forget. `systemctl status youwin-backup.service` shows non-zero and the journal
+carries the status and the remote's own response body, which is what tells a
+wrong path apart from a full quota or an expired credential. This is the one
+place in the deploy where silence would be the dangerous outcome: a timer that
+exits zero having uploaded nothing looks exactly like one that worked.
+
+Retention off-site is the remote's job. This never deletes anything it did not
+just write, and every target worth using has lifecycle rules of its own.
+
+Leave `YOUWIN_OFFSITE_URL` unset and none of this happens — local dated
+snapshots are still taken, and pulling them down by hand stays perfectly good:
 
 ```bash
 rsync -avz youwin-admin@server.example:/var/backups/youwin/ /mnt/c/Users/theaz/backups/youwin/

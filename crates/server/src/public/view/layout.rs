@@ -85,8 +85,12 @@ pub fn render(assets: &Assets, page: &Page<'_>, content: Markup) -> Markup {
                     header class="border-b border-base-300 py-6" {
                         div class="flex items-baseline justify-between gap-4" {
                             a href="/" class="text-lg font-medium no-underline" { "youwin.dev" }
-                            nav class="flex gap-4 text-sm text-secondary" {
+                            // Wraps rather than scrolls: at 320px these five sit
+                            // on two lines, which is fine, where a nowrap row
+                            // would push `github` off the edge.
+                            nav class="flex flex-wrap justify-end gap-x-4 gap-y-1 text-sm text-secondary" {
                                 a href="/about" { "about" }
+                                a href="/archive" { "archive" }
                                 a href="/tags" { "tags" }
                                 a href="/feed.xml" { "feed" }
                                 a href="https://github.com/you-win" rel="me noopener" { "github" }
@@ -111,10 +115,17 @@ pub fn render(assets: &Assets, page: &Page<'_>, content: Markup) -> Markup {
 
                     main class="flex-1 py-8" { (content) }
 
-                    footer class="border-t border-base-300 py-6 text-sm text-secondary" {
-                        "Written by "
-                        a href="https://github.com/you-win" rel="me noopener" { "you-win" }
-                        "."
+                    footer class="flex flex-wrap items-baseline justify-between gap-2 \
+                                  border-t border-base-300 py-6 text-sm text-secondary" {
+                        span {
+                            "Written by "
+                            a href="https://github.com/you-win" rel="me noopener" { "you-win" }
+                            "."
+                        }
+                        // In the footer rather than the nav: it is a thing to do
+                        // when you have finished reading, not a way to get
+                        // somewhere.
+                        a href="/random" { "something at random →" }
                     }
                 }
             }

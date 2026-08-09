@@ -16,6 +16,12 @@ interface Props {
   post: Post;
   /** Set when the post is still in flight, before the server has rendered it. */
   pending?: boolean;
+  /**
+   * What to call that state. "posting…" for a request in flight; something else
+   * for a post sitting in the outbox, which is not in flight and may not be for
+   * hours.
+   */
+  pendingLabel?: string;
   /** Marks the post whose permalink you followed, inside a thread. */
   focused?: boolean;
   onChanged?: (post: Post) => void;
@@ -120,7 +126,9 @@ export default function PostCard(props: Props) {
         </Show>
 
         <Show when={props.pending}>
-          <span class="text-base-content/40">· posting…</span>
+          <span class="text-base-content/40">
+            · {props.pendingLabel ?? "posting…"}
+          </span>
         </Show>
       </header>
 
@@ -262,6 +270,11 @@ export default function PostCard(props: Props) {
             submitLabel="Reply"
             allowDraft={false}
             autofocus
+            // Per-post, so two half-written replies never overwrite each other.
+            // The edit composer above deliberately has none: its starting text
+            // is already on the server, and a stored copy would mean an
+            // abandoned edit reappearing over the published post days later.
+            draftKey={`reply.${props.post.id}`}
             onSubmit={reply}
             onCancel={() => setReplying(false)}
           />

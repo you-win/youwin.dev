@@ -44,6 +44,13 @@ pub fn router(read: SqlitePool, assets: Assets, origin: String, dist: &Path) -> 
         .route("/search", get(routes::search))
         .route("/t/{tag}", get(routes::tag_page))
         .route("/tags", get(routes::tag_index))
+        // The date spine. `/archive/{year}` is a redirect rather than a page —
+        // the index already lists every month of every year.
+        .route("/archive", get(routes::archive_index))
+        .route("/archive/{year}", get(routes::archive_year))
+        .route("/archive/{year}/{month}", get(routes::archive_month))
+        .route("/on/{month}/{day}", get(routes::on_this_day))
+        .route("/random", get(routes::random))
         .route("/about", get(routes::about))
         .route("/familiar", get(routes::familiar))
         .route("/feed.xml", get(routes::feed_xml))

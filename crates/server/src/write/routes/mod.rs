@@ -2,5 +2,6 @@
 
 pub mod auth;
 pub mod familiar;
+pub mod moods;
 pub mod posts;
 pub mod preview;

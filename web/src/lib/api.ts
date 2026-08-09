@@ -38,6 +38,24 @@ export const MOODS: readonly Mood[] = [
   "neutral",
 ];
 
+/**
+ * Sentence case, for anywhere a mood is shown to a person.
+ *
+ * Spelled out rather than capitalized in CSS: `text-transform` on `<option>` is
+ * ignored by several browsers, and this is seven words. Here rather than in the
+ * composer because the timeline names them too, and two lists would drift the
+ * first time one was renamed.
+ */
+export const MOOD_LABEL: Record<Mood, string> = {
+  content: "Content",
+  contemplative: "Contemplative",
+  tired: "Tired",
+  excited: "Excited",
+  melancholy: "Melancholy",
+  chaos: "Chaos",
+  neutral: "Neutral",
+};
+
 export interface Post {
   id: string;
   body: string;
@@ -76,6 +94,31 @@ export interface Me {
   authenticated: boolean;
   session_started: number;
   active_sessions: number;
+}
+
+/** One month of the mood timeline. See `write::routes::moods`. */
+export interface MoodMonth {
+  /** `YYYY-MM` — stable, sortable, and what a list keys on. */
+  month: string;
+  /** `August 2026`, formatted server-side so youwin.dev and this agree. */
+  label: string;
+  /** Every post written that month, at any visibility. */
+  total: number;
+  /**
+   * All seven moods, always, in the picker's order — zeros included.
+   *
+   * A mood that vanished in a quiet month would shift every colour after it,
+   * which is the one thing a timeline must not do.
+   */
+  moods: { mood: Mood; posts: number }[];
+  /**
+   * Posts where the picker was left alone.
+   *
+   * Deliberately not an eighth mood. "Did not say" is the absence of one — the
+   * familiar reads it as permission to infer — and folding it in would put that
+   * distinction one refactor away from being lost.
+   */
+  unsaid: number;
 }
 
 /**
@@ -232,17 +275,26 @@ export const api = {
   show: (id: string) =>
     request<Thread>("GET", `/api/posts/${encodeURIComponent(id)}`),
 
+  /**
+   * `idempotencyKey` makes the request safe to send twice.
+   *
+   * Set only by the outbox, which cannot tell a request that never arrived from
+   * a reply that never came back. The server returns the post the first attempt
+   * wrote rather than writing a second one; see `lib/outbox.ts`.
+   */
   create: (
     body: string,
     visibility: Visibility,
     mood: Mood | null,
     parentId?: string,
+    idempotencyKey?: string,
   ) =>
     request<Post>("POST", "/api/posts", {
       body,
       visibility,
       mood,
       parent_id: parentId,
+      idempotency_key: idempotencyKey,
     }),
 
   /**
@@ -264,6 +316,8 @@ export const api = {
     ),
 
   familiar: () => request<FamiliarState>("GET", "/api/familiar"),
+
+  moods: () => request<{ months: MoodMonth[] }>("GET", "/api/moods"),
 
   /**
    * The familiar as this draft would leave it. Changes nothing.

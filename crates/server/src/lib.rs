@@ -14,6 +14,7 @@
 pub mod auth;
 pub mod backup;
 pub mod cache;
+pub mod calendar;
 pub mod clock;
 pub mod config;
 pub mod db;
@@ -21,6 +22,7 @@ pub mod error;
 pub mod export;
 pub mod familiar;
 pub mod mood;
+pub mod offsite;
 pub mod public;
 pub mod render;
 pub mod seed;

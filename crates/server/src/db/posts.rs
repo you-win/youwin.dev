@@ -552,6 +552,23 @@ pub async fn feed_page(
     Ok((rows, next))
 }
 
+/// The public id of one post picked at random, or `None` on an empty archive.
+///
+/// `ORDER BY random() LIMIT 1` scans the table, which at a few thousand rows is
+/// nothing and needs no schema. The alternatives — a random rowid with a retry
+/// loop, or an offset into a counted range — both have to cope with the holes
+/// that soft deletes and drafts leave in the id space, and get it subtly wrong
+/// in a way that shows up as "the random link keeps landing on the same post".
+pub async fn random_public_id(pool: &SqlitePool) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT public_id FROM posts
+          WHERE deleted_at IS NULL AND visibility = 'public'
+          ORDER BY random() LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+}
+
 /// A single post by its public id. `None` for drafts, deletions, and bad ids
 /// alike — the caller cannot tell them apart, and neither can a visitor.
 pub async fn by_public_id(pool: &SqlitePool, public_id: &str) -> Result<Option<Post>, sqlx::Error> {
@@ -567,6 +584,16 @@ pub async fn thread(pool: &SqlitePool, root_id: i64) -> Result<Vec<Post>, sqlx::
     sqlx::query_as(THREAD).bind(root_id).fetch_all(pool).await
 }
 
+// Deliberately without `deleted_at IS NULL`. A key is spent the moment it writes
+// a row, and a queued post that was published and then deleted must come back as
+// that deleted post rather than being written a second time — otherwise
+// "delete, then lose signal" resurrects it.
+const BY_IDEMPOTENCY_KEY: &str = "
+    SELECT id, public_id, parent_id, root_id,
+           body_html, body_text, visibility, mood, created_at, edited_at
+      FROM posts
+     WHERE idempotency_key = ?1";
+
 /// Writes a post, rendering the markdown on the way in.
 ///
 /// `root_id` is NOT NULL but a new thread root cannot know its own id until the
@@ -581,10 +608,58 @@ pub async fn insert(
     mood: Option<Mood>,
     created_at: i64,
 ) -> Result<Post, sqlx::Error> {
+    write(pool, None, body, parent_id, visibility, mood, created_at)
+        .await
+        .map(|(post, _)| post)
+}
+
+/// Writes a post unless `key` has already written one.
+///
+/// Returns `(post, created)` — `false` means this key was seen before and the
+/// post it made is being handed back untouched. The caller answers `200` rather
+/// than `201` on that path, which is the only difference a client sees.
+///
+/// The check and the insert share one transaction, and the write pool is a
+/// single connection, so two simultaneous flushes of the same queued post
+/// serialize rather than racing: the second finds the first's row. Doing the
+/// lookup in the handler instead would leave a window where both miss and the
+/// second gets a constraint violation — a 500 for a request that was correct.
+pub async fn insert_once(
+    pool: &SqlitePool,
+    key: &str,
+    body: &str,
+    parent_id: Option<i64>,
+    visibility: Visibility,
+    mood: Option<Mood>,
+    created_at: i64,
+) -> Result<(Post, bool), sqlx::Error> {
+    write(pool, Some(key), body, parent_id, visibility, mood, created_at).await
+}
+
+async fn write(
+    pool: &SqlitePool,
+    key: Option<&str>,
+    body: &str,
+    parent_id: Option<i64>,
+    visibility: Visibility,
+    mood: Option<Mood>,
+    created_at: i64,
+) -> Result<(Post, bool), sqlx::Error> {
     let rendered = markdown::render(body);
     let public_id = new_public_id();
 
     let mut tx = pool.begin().await?;
+
+    if let Some(key) = key {
+        if let Some(existing) = sqlx::query_as::<_, Post>(BY_IDEMPOTENCY_KEY)
+            .bind(key)
+            .fetch_optional(&mut *tx)
+            .await?
+        {
+            // Nothing was written, so the transaction is simply dropped.
+            return Ok((existing, false));
+        }
+    }
 
     let parent_root: Option<i64> = match parent_id {
         Some(parent) => Some(
@@ -599,8 +674,8 @@ pub async fn insert(
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO posts
             (public_id, parent_id, root_id, body, body_html, body_text,
-             visibility, mood, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+             visibility, mood, created_at, updated_at, idempotency_key)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10)
          RETURNING id",
     )
     .bind(&public_id)
@@ -612,6 +687,7 @@ pub async fn insert(
     .bind(visibility)
     .bind(mood)
     .bind(created_at)
+    .bind(key)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -628,16 +704,19 @@ pub async fn insert(
 
     tx.commit().await?;
 
-    Ok(Post {
-        id,
-        public_id,
-        parent_id,
-        root_id: parent_root.unwrap_or(id),
-        body_html: rendered.html,
-        body_text: rendered.text,
-        visibility,
-        mood,
-        created_at,
-        edited_at: None,
-    })
+    Ok((
+        Post {
+            id,
+            public_id,
+            parent_id,
+            root_id: parent_root.unwrap_or(id),
+            body_html: rendered.html,
+            body_text: rendered.text,
+            visibility,
+            mood,
+            created_at,
+            edited_at: None,
+        },
+        true,
+    ))
 }

@@ -14,12 +14,16 @@ use std::{fs, path::Path};
 
 use anyhow::{Context as _, Result, bail};
 
-use crate::{clock::now_millis, db::Db, public::view::time_fmt};
+use crate::{clock::now_millis, db::Db, offsite::Uploader, public::view::time_fmt};
 
-/// Dated backups kept before the oldest is removed.
+/// Dated backups kept locally before the oldest is removed.
+///
+/// Retention off-site is deliberately not managed from here: this program has no
+/// business deleting objects on a remote it can only append to, and every target
+/// worth using has its own lifecycle rules. See [`crate::offsite`].
 const KEEP: usize = 30;
 
-pub async fn run(db: &Db, dir: &Path) -> Result<()> {
+pub async fn run(db: &Db, dir: &Path, offsite: &Uploader) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
 
     let target = dir.join(format!("youwin-{}.db", time_fmt::date(now_millis())));
@@ -62,6 +66,23 @@ pub async fn run(db: &Db, dir: &Path) -> Result<()> {
             String::new()
         }
     );
+
+    // Last, and after the rename: what leaves the machine is the finished file,
+    // never the `.part`. A failure here fails the whole subcommand — the local
+    // snapshot is already safely written, so there is nothing to roll back, and
+    // an off-site copy that quietly did not happen is the one outcome this
+    // feature exists to make impossible.
+    //
+    // Re-read from disk rather than kept from the VACUUM: this uploads the file
+    // that is actually sitting there, which is the thing a restore would use.
+    if offsite.is_enabled() {
+        let name = target
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("youwin.db");
+        let body = fs::read(&target).with_context(|| format!("reading {}", target.display()))?;
+        offsite.put(name, "application/octet-stream", body).await?;
+    }
 
     Ok(())
 }

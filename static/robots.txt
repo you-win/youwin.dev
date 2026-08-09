@@ -7,3 +7,8 @@
 
 User-agent: *
 Allow: /
+
+# The one path a meta tag cannot cover: /random is a 302, and a redirect has no
+# document to carry a robots directive. Nothing is lost by keeping crawlers off
+# it — every post it can reach is already linked from the feed and the archive.
+Disallow: /random

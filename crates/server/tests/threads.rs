@@ -22,8 +22,12 @@ use youwin_server::{
     public::{self, assets::Assets},
 };
 
-/// 2026-08-01T00:00:00Z. Posts are written a minute apart so "oldest first" is
+/// 2026-08-05T00:00:00Z. Posts are written a minute apart so "oldest first" is
 /// unambiguous and never depends on the rowid tie-break.
+///
+/// (The date is arbitrary — nothing here depends on it. It said 08-01 for a
+/// while, which is four days out, and that comment was copied into code where
+/// the exact date did matter.)
 const T0: i64 = 1_785_888_000_000;
 const MINUTE: i64 = 60_000;
 

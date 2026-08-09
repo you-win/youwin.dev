@@ -10,11 +10,13 @@ import {
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
 
 import { setUnauthorizedHandler } from "./lib/api";
+import { initOutbox, queued } from "./lib/outbox";
 import { initPwa, install, installable, update, updateReady } from "./lib/pwa";
 import { clearSession, loadSession, session } from "./lib/session";
 import Drafts from "./routes/Drafts";
 import Feed from "./routes/Feed";
 import Login from "./routes/Login";
+import Moods from "./routes/Moods";
 import Permalink from "./routes/Permalink";
 import Search from "./routes/Search";
 import Settings from "./routes/Settings";
@@ -34,6 +36,10 @@ function Shell(props: RouteSectionProps) {
   onMount(() => {
     void loadSession();
     initPwa();
+    // Restores anything queued offline and sends it if there is a connection.
+    // Before the session resolves is fine: a flush that 401s is routed to the
+    // login page by the same interceptor as any other request.
+    initOutbox();
 
     // Any 401, from any request, lands here — so no component has to handle an
     // expired session, and none of them can forget to.
@@ -75,6 +81,7 @@ function Shell(props: RouteSectionProps) {
             </Show>
             <A href="/search">search</A>
             <A href="/drafts">drafts</A>
+            <A href="/moods">moods</A>
             <A href="/settings">settings</A>
             <a
               href="https://youwin.dev"
@@ -88,12 +95,22 @@ function Shell(props: RouteSectionProps) {
         </header>
       </Show>
 
-      {/* Offline is worth saying plainly: the feed still reads from cache, but
-          posting will fail, and finding that out by losing a draft is not the
-          way to learn it. */}
+      {/* Offline is worth saying plainly — but it no longer means posting
+          fails. What you write is queued and sent when the connection comes
+          back, so the banner says what will happen rather than what will not. */}
       <Show when={offline()}>
         <div class="mt-4 rounded-box border border-warning/40 bg-warning/10 px-4 py-2 text-sm text-warning">
-          Offline. You can read, but posting will not work until you reconnect.
+          Offline. Anything you write is kept and sent when you reconnect.
+        </div>
+      </Show>
+
+      {/* Shown online too: a queue that is not empty while there is a
+          connection means a flush is in progress or has stalled, and that is
+          exactly when you would want to know it exists. */}
+      <Show when={queued().length > 0 && !offline()}>
+        <div class="mt-4 rounded-box border border-base-300 bg-base-200 px-4 py-2 text-sm text-secondary">
+          {queued().length} {queued().length === 1 ? "post" : "posts"} waiting to
+          be sent.
         </div>
       </Show>
 
@@ -136,6 +153,7 @@ export default function App() {
       <Route path="/p/:id" component={Permalink} />
       <Route path="/search" component={Search} />
       <Route path="/drafts" component={Drafts} />
+      <Route path="/moods" component={Moods} />
       <Route path="/settings" component={Settings} />
       <Route path="/login" component={Login} />
       <Route

@@ -10,6 +10,12 @@
 # Both run as the same user as the server. Neither stops it: VACUUM INTO reads
 # through a snapshot of a live WAL database, so there is no downtime and no
 # window where the site is unavailable.
+#
+# Both also send their artifact off-site when YOUWIN_OFFSITE_URL is set — which
+# is what makes the pair a backup rather than a second copy on the disk it is
+# protecting. That is off by default and off is supported; see the hardening
+# note about network access at the bottom of this file, which the feature
+# changed.
 
 [Unit]
 Description=youwin.dev nightly backup and export
@@ -26,7 +32,23 @@ WorkingDirectory=/srv/sites/youwin.dev
 Environment=YOUWIN_DB=/var/lib/youwin/youwin.db
 Environment=RUST_LOG=youwin_server=info
 
-# Keeps the last 30 dated snapshots itself; nothing external prunes them.
+# Off-site destination and credential, if any. In secrets.env rather than here
+# for the same reason the server's are: a deploy can reinstall this unit, and a
+# value edited into it would disappear with no symptom beyond backups quietly
+# ceasing to leave the machine — which is indistinguishable from working.
+#
+#   YOUWIN_OFFSITE_URL   https://…/youwin — the directory each file is PUT into
+#   YOUWIN_OFFSITE_AUTH  a complete Authorization header value, e.g.
+#                        "Bearer …" or "Basic …". Optional: omit it for a
+#                        target that authenticates through the URL itself.
+#
+# Leave YOUWIN_OFFSITE_URL unset to keep local copies only. Shared with the
+# server's unit, which ignores both — nothing on the serving path uploads.
+EnvironmentFile=/etc/youwin/secrets.env
+
+# Keeps the last 30 dated snapshots itself; nothing external prunes them. An
+# upload that fails takes the unit to `failed` rather than exiting zero, so a
+# broken credential is visible in `systemctl status` instead of silent.
 ExecStart=/srv/sites/youwin.dev/current/bin/youwin-server backup /var/backups/youwin
 ExecStart=/srv/sites/youwin.dev/current/bin/youwin-server export /var/backups/youwin/export
 
@@ -42,8 +64,17 @@ ReadWritePaths=/var/lib/youwin /var/backups/youwin
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-# No network at all: this reads a file and writes files.
-RestrictAddressFamilies=AF_UNIX
+# This used to be AF_UNIX alone, under the comment "no network at all: this
+# reads a file and writes files". That stopped being true when the off-site
+# upload landed, and a hardening line whose comment describes the old behaviour
+# is worse than a looser one that is honest — the next person to read it would
+# trust a claim the unit no longer makes.
+#
+# Outbound HTTPS is now reachable from this unit. Nothing here listens, and
+# nothing here is reachable from outside; the only sockets it opens are the ones
+# `backup` and `export` make to YOUWIN_OFFSITE_URL, and none at all when that is
+# unset.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictRealtime=yes
 LockPersonality=yes

@@ -20,7 +20,9 @@ use anyhow::{Context as _, Result};
 use serde::Serialize;
 
 use crate::{
+    clock::now_millis,
     db::{Db, posts, tags},
+    offsite::Uploader,
     public::view::time_fmt,
 };
 
@@ -32,7 +34,7 @@ struct Entry {
     tags: Vec<String>,
 }
 
-pub async fn run(db: &Db, dir: &Path) -> Result<()> {
+pub async fn run(db: &Db, dir: &Path, offsite: &Uploader) -> Result<()> {
     let rows = posts::export_all(&db.read)
         .await
         .context("reading posts for export")?;
@@ -57,7 +59,7 @@ pub async fn run(db: &Db, dir: &Path) -> Result<()> {
 
     let json_path = dir.join("posts.json");
     let json = serde_json::to_string_pretty(&entries).context("serializing posts")?;
-    fs::write(&json_path, json).with_context(|| format!("writing {}", json_path.display()))?;
+    fs::write(&json_path, &json).with_context(|| format!("writing {}", json_path.display()))?;
 
     let mut written = 0;
     let mut skipped = 0;
@@ -81,6 +83,25 @@ pub async fn run(db: &Db, dir: &Path) -> Result<()> {
         entries.len(),
         dir.display()
     );
+
+    // `posts.json` alone goes off-site, and it goes dated.
+    //
+    // Dated, unlike the local copy, because the local directory is refreshed in
+    // place — which is right for a working export and wrong for the copy that
+    // has to survive the machine. If a bad run overwrote `posts.json` here, an
+    // off-site object of the same name would be overwritten with it.
+    //
+    // Alone, because the markdown tree is a rendering of this file: everything
+    // in it is derivable from the JSON, and uploading a directory means either a
+    // tar dependency or one request per post. JSON with no schema and no
+    // toolchain is already readable in ten years, which was the tree's whole
+    // argument for existing.
+    if offsite.is_enabled() {
+        let name = format!("youwin-{}.json", time_fmt::date(now_millis()));
+        offsite
+            .put(&name, "application/json", json.into_bytes())
+            .await?;
+    }
 
     Ok(())
 }
