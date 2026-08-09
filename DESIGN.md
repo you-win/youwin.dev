@@ -547,6 +547,20 @@ already knows how to be narrow. The picture is centred with CSS rather than padd
 character count, which would be wrong anyway: half these glyphs are East Asian Ambiguous
 and render at a width the server cannot know.
 
+**The bars had the same fault, small enough to survive the first look (M8).** A stat bar was
+14 characters, chosen as "about as wide as fits beside a label on a 375px screen" — measured
+against `ui-monospace`, where these glyphs advance 0.59em, and asserted rather than checked
+anywhere else. `█` and `░` are Block Elements and Android's monospace face does not have them,
+so they fall back to a symbols font that is not monospaced at all and advance a full em: 197px
+of bar instead of 115px, which leaves a 40px number nowhere to go beside an 80px label inside
+296px of card, and the percentage is pushed off the right edge of the page. It is the
+47-character frame again, at a scale small enough to look fine on the machine it was written
+on. Ten characters fit at both metrics with room to spare and make each block a clean tenth
+rather than 7.14%, and the bar now carries `min-w-0` so that on some font nobody has tested it
+gives up its own tail rather than taking the number with it. Verified by geometry at 320, 360
+and 375px against a simulated 1.0em and 1.2em advance: at 1.2em, worse than anything observed,
+the bars clip and the number is still inside the card.
+
 **Hours and days are UTC**, like every other timestamp here. Phase learning is relative to
 the archive's own histogram, so it self-calibrates and the absolute hours stop mattering
 once there is a fortnight of data — before that a default schedule is blended in, weighted
@@ -1008,7 +1022,7 @@ simply finishes.
 | **M5** | Polish | ✅ **Done.** FTS5 search on both surfaces, hashtags with `/t/:tag` and `/tags`, `export`, `backup` + nightly timer, `rerender`, Cloudflare purge-on-write (off unless configured). 114 tests green |
 | **M6** | The Familiar | ✅ **Done.** The whole state machine — topics, mood, energy decay and bursts, learned circadian phase, growth stages, pose triggers — plus compositional kaomoji rendering, the character sheet, and the five-minute snapshot. On the feed and at `/familiar`. 178 tests green |
 | **M7** | Mood as a field | ✅ **Done.** `posts.mood`, a picker in the composer, and `0003` backfilling the hashtags that used to carry it. Hashtags are ordinary tags again; keyword inference stays as the fallback for a post with nothing picked. 190 tests green |
-| **M8** | A familiar worth coming back to | 🚧 **In progress.** [`familiar-design.md`](familiar-design.md) is the spec, rewritten against the code and no longer a dangling reference. `familiar::baseline` landed first: sittings instead of posts, quantiles instead of means, and a decay half-life derived from the writer's own gap distribution — which fixes a pet that read every bursty writer as an absent one. Then the composer: `GET /api/familiar`, `POST /api/familiar/draft`, and a pet above the box that changes as you type. Then speech — one line, picked as the least likely true thing about the archive, in the pet's own voice on all three surfaces, and silence on an ordinary day. Then sparks — the pet's first transient: milestones that last a window instead of a single post, and a visible welcome back from a real absence. Then traits — the slow channel, and two of the three the spec asked for turned out to have been built already by the baseline and the phase profile, so what landed is the two places the pet was still one-size-fits-all: what one post is worth, and whether its hours mean anything. Still to come, in order: a diet-shift line, the chronicle, anticipation. 277 tests green |
+| **M8** | A familiar worth coming back to | 🚧 **In progress.** [`familiar-design.md`](familiar-design.md) is the spec, rewritten against the code and no longer a dangling reference. `familiar::baseline` landed first: sittings instead of posts, quantiles instead of means, and a decay half-life derived from the writer's own gap distribution — which fixes a pet that read every bursty writer as an absent one. Then the composer: `GET /api/familiar`, `POST /api/familiar/draft`, and a pet above the box that changes as you type. Then speech — one line, picked as the least likely true thing about the archive, in the pet's own voice on all three surfaces, and silence on an ordinary day. Then sparks — the pet's first transient: milestones that last a window instead of a single post, and a visible welcome back from a real absence. Then traits — the slow channel, and two of the three the spec asked for turned out to have been built already by the baseline and the phase profile, so what landed is the two places the pet was still one-size-fits-all: what one post is worth, and whether its hours mean anything. Still to come, in order: a diet-shift line, the chronicle, anticipation. 278 tests green |
 
 The split changes the shape of the plan more than anything else: **M1 ships a complete,
 finished artifact** — a public archive at `youwin.dev` that works and is done — rather

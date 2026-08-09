@@ -15,9 +15,27 @@ use maud::{Markup, html};
 
 use crate::familiar::{Reading, Stage, render, stats::Vitals};
 
-/// Characters in a stat bar. The design's width, and about as wide as fits
-/// beside a label on a 375px screen.
-const BAR: usize = 14;
+/// Characters in a stat bar.
+///
+/// Ten rather than the design's fourteen, and the reason is a measurement that
+/// was asserted rather than taken. Fourteen was chosen as "about as wide as fits
+/// beside a label on a 375px screen", which is true at the advance width
+/// `ui-monospace` gives these glyphs — 0.59em — and false on a phone.
+///
+/// `█` and `░` are Block Elements, and Android's monospace face does not have
+/// them. They fall back to a symbols font that is not monospaced at all, where
+/// they advance a full em: 14 characters measure 197px instead of 115px, which
+/// leaves a 40px number nowhere to go beside an 80px label in 296px of card, and
+/// the percentage is pushed off the right edge. This is the same fault as the
+/// 47-character frame the design's stats box was drawn in and that `sheet` does
+/// not use — a fixed character count in a box that cannot reflow — just small
+/// enough to have survived the first look.
+///
+/// Ten fits with room to spare at both metrics, and each block is a clean tenth
+/// rather than the meaningless 7.14% fourteen made it. The `min-w-0` on the bar
+/// is the belt to that braces: on some font nobody has tested, the bar gives up
+/// its own tail rather than taking the number with it.
+const BAR: usize = 10;
 
 /// The block above the feed: the pet, three lines of context, and a link.
 pub fn widget(reading: &Reading) -> Markup {
@@ -200,15 +218,22 @@ fn fact(label: &str, value: &str, note: &str) -> Markup {
 /// One labelled bar.
 ///
 /// The bar is two spans rather than one string so the filled part can be
-/// coloured, and `aria-hidden` because a screen reader announcing fourteen block
+/// coloured, and `aria-hidden` because a screen reader announcing ten block
 /// characters is noise — the number beside it is the same information.
+///
+/// The label and the number hold their widths and the bar is the one part that
+/// gives, which is the right way round: the number is the fact and the bar is
+/// the texture. `min-w-0` is what makes that possible at all — a flex item's
+/// default `min-width: auto` refuses to shrink below its content, and ten
+/// unbreakable glyphs have no smaller size to fall back to, so without it the
+/// row grows and the number leaves the card. See [`BAR`].
 fn meter(label: &str, score: u8) -> Markup {
     let filled = score as usize * BAR / 100;
 
     html! {
-        div class="flex items-baseline gap-3" {
+        div class="flex items-baseline gap-2" {
             span class="w-20 shrink-0 truncate text-secondary" { (label) }
-            span aria-hidden="true" class="font-mono" {
+            span aria-hidden="true" class="min-w-0 overflow-hidden font-mono" {
                 span class="text-primary" { (repeat('█', filled)) }
                 span class="text-base-300" { (repeat('░', BAR - filled)) }
             }
@@ -300,5 +325,20 @@ mod tests {
             assert!(filled <= BAR, "{score}% overflowed the bar");
             assert_eq!(repeat('█', filled).chars().count() + repeat('░', BAR - filled).chars().count(), BAR);
         }
+    }
+
+    #[test]
+    fn only_a_full_score_fills_the_bar() {
+        // Truncating rather than rounding, so the two ends are honest: a bar
+        // that is visibly full means 100 and nothing else, and one with a single
+        // block means the score has actually reached a tenth. The number beside
+        // it carries the precision the blocks give up.
+        let filled = |score: u8| score as usize * BAR / 100;
+
+        assert_eq!(filled(100), BAR);
+        assert_eq!(filled(99), BAR - 1, "99 is not full");
+        assert_eq!(filled(0), 0);
+        assert_eq!(filled(9), 0, "under a tenth reads as none");
+        assert_eq!(filled(10), 1);
     }
 }
