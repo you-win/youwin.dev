@@ -144,9 +144,13 @@ export default function Composer(props: Props) {
       </Show>
 
       <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
-        <div class="flex items-center gap-3">
+        {/* Wraps for the same reason the row above it does. Everything here fits
+            on one line down to 375px, but only just — the safety valve is what
+            stops a longer mood name or a larger font from being absorbed by
+            squashing the controls instead. */}
+        <div class="flex flex-wrap items-center gap-3">
           <span
-            class="text-sm tabular-nums"
+            class="shrink-0 whitespace-nowrap text-sm tabular-nums"
             classList={{
               "text-secondary": !overSoft(),
               "text-warning": overSoft() && !overHard(),
@@ -156,9 +160,17 @@ export default function Composer(props: Props) {
             {count()} / {SOFT_LIMIT}
           </span>
 
+          {/* `w-auto!` because daisyUI's `.select` is `width: 100%`, which in a
+              shrink-to-fit flex row settles at a width narrower than the option
+              it is displaying — "Contemplative" needed 103px and had 48px, and
+              even the "Mood…" placeholder was clipped. Sizing to the selected
+              option costs a small width change when one is picked, which beats
+              a control that cannot show what it is set to. The `!` is the point
+              of the important modifier: overriding a component library default
+              is exactly what it is for. */}
           <Show when={props.allowDraft !== false}>
             <select
-              class="select select-sm border-base-300 bg-base-100"
+              class="select select-sm w-auto! border-base-300 bg-base-100"
               value={visibility()}
               disabled={busy()}
               aria-label="Visibility"
@@ -177,7 +189,7 @@ export default function Composer(props: Props) {
               option says "no mood" rather than defaulting to Neutral, a value
               that deliberately means something different. */}
           <select
-            class="select select-sm border-base-300 bg-base-100"
+            class="select select-sm w-auto! border-base-300 bg-base-100"
             value={mood() ?? ""}
             disabled={busy()}
             aria-label="Mood"
