@@ -43,9 +43,17 @@ pub fn widget(reading: &Reading) -> Markup {
                         (state.stage.label()) " " (state.form.label())
                         " · " (state.phase.label()) " hours"
                     }
-                    p class="text-secondary" {
-                        (reading.vitals.posts) " posts · " (cadence(reading.vitals.cadence_hours))
-                        " cadence"
+                    // Speech displaces the stats line rather than adding a
+                    // fourth. It only appears when there is something genuinely
+                    // unusual to report, the numbers it covers are all on
+                    // `/familiar` anyway, and a widget that grows a line on
+                    // interesting days would reflow the feed under it.
+                    @match &reading.speech {
+                        Some(said) => p class="text-secondary" { (said.line) },
+                        None => p class="text-secondary" {
+                            (reading.vitals.posts) " posts · "
+                            (cadence(reading.vitals.cadence_hours)) " cadence"
+                        },
                     }
                 }
             }
@@ -70,6 +78,12 @@ pub fn sheet(reading: &Reading) -> Markup {
                         (state.mood.as_str()) " · " (state.level.label())
                         span class="text-secondary" { " · " (state.phase.label()) " hours" }
                     }
+                }
+
+                // Under the picture, where the pet is the subject and a line in
+                // its own voice reads as the pet's rather than the page's.
+                @if let Some(said) = &reading.speech {
+                    p class="mt-2 text-center text-sm text-secondary" { (said.line) }
                 }
             }
 

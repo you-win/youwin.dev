@@ -172,6 +172,21 @@ async fn nothing_unpublished_previews_as_a_change(pool: SqlitePool) {
 }
 
 #[sqlx::test]
+async fn an_ordinary_archive_has_nothing_to_say(pool: SqlitePool) {
+    let app = common::app(pool);
+    let cookie = login(&app).await;
+
+    // One post, just made. Nothing about that is unusual enough to remark on,
+    // and the pet is supposed to keep quiet rather than reach for filler.
+    create_post(&app, &cookie, "the first note, about rust", "public").await;
+
+    assert!(
+        familiar(&app, &cookie).await["speech"].is_null(),
+        "a brand new archive should have no opinions yet",
+    );
+}
+
+#[sqlx::test]
 async fn what_the_preview_promises_is_what_posting_delivers(pool: SqlitePool) {
     let app = common::app(pool);
     let cookie = login(&app).await;

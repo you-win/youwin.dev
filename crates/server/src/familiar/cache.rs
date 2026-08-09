@@ -20,7 +20,8 @@ use sqlx::SqlitePool;
 use crate::{
     db,
     familiar::{
-        Blend, Mood, Morsel, PetState, compute, mood,
+        Baseline, Blend, Mood, Morsel, PetState, compute, mood,
+        speech::{self, Utterance},
         stats::{self, Sheet, Vitals},
         topics,
     },
@@ -49,6 +50,13 @@ pub struct Reading {
     /// Moods across the whole archive, commonest first.
     pub moods: Vec<(Mood, f64)>,
     pub sheet: Sheet,
+    /// The one thing worth saying right now, or nothing on an ordinary day.
+    ///
+    /// Part of the snapshot rather than derived per surface, so the widget, the
+    /// character sheet and the composer cannot say three different things about
+    /// the same moment — and so the day-rotation between equally surprising
+    /// candidates lands on one answer per reading.
+    pub speech: Option<Utterance>,
 }
 
 impl Reading {
@@ -205,13 +213,15 @@ fn reading(posts: &[Morsel], previous: Option<&PetState>, now: i64) -> Reading {
     let state = compute(posts, previous, now);
     let vitals = stats::vitals(posts, now);
     let diet = topics::classify(posts);
+    let moods = mood::distribution(posts);
 
     Reading {
         sheet: stats::sheet(&state, &vitals, diet),
+        speech: speech::speak(posts, &Baseline::of(posts), &state, &moods, now),
         state,
         vitals,
         diet,
-        moods: mood::distribution(posts),
+        moods,
     }
 }
 

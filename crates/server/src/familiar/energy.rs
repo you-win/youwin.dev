@@ -49,7 +49,11 @@ const MIN_HALF_LIFE_HOURS: f64 = 2.0;
 const MAX_HALF_LIFE_HOURS: f64 = 14.0 * 24.0;
 
 /// Days over which the learned posting rhythm displaces the assumed one.
-const COLD_START_DAYS: f64 = 14.0;
+///
+/// Public because it is also the point at which [`super::speech`] is willing to
+/// say anything out loud about the hours this archive keeps: before it, the
+/// profile is still partly a guess about a writer nobody has watched yet.
+pub const COLD_START_DAYS: f64 = 14.0;
 
 /// Window over which posts stack into a burst.
 const BURST_WINDOW_MINUTES: f64 = 30.0;
@@ -167,7 +171,11 @@ pub fn phase_at(posts: &[Morsel], now: i64) -> Phase {
     phases(&profile(posts, now))[hour_of(now)]
 }
 
-/// The hourly posting profile the phases are cut from.
+/// The hourly posting profile the phases are cut from. Densities summing to one.
+///
+/// Public because [`super::speech`] judges the hour a post landed in against the
+/// same curve the phase is cut from — two answers to "is this a normal time for
+/// this archive" that must not be able to disagree.
 ///
 /// Blends the learned histogram with an assumed human schedule, weighted by how
 /// much history there is: nothing on day one, entirely learned after
@@ -175,7 +183,7 @@ pub fn phase_at(posts: &[Morsel], now: i64) -> Phase {
 /// shifts to match the user's actual pattern", and a weighted blend is that
 /// sentence rather than an approximation of it — no threshold at which the pet's
 /// sense of time lurches.
-fn profile(posts: &[Morsel], now: i64) -> [f64; 24] {
+pub fn profile(posts: &[Morsel], now: i64) -> [f64; 24] {
     let learned = normalized(smoothed(histogram(posts)));
     let assumed = normalized(ASSUMED_SCHEDULE);
 
@@ -331,7 +339,7 @@ fn phases(profile: &[f64; 24]) -> [Phase; 24] {
 /// seconds with no leap seconds and its epoch is midnight UTC, so the hour is
 /// exact arithmetic. `div_euclid` keeps that true for timestamps before 1970,
 /// which a corrupt row could hold.
-fn hour_of(millis: i64) -> usize {
+pub fn hour_of(millis: i64) -> usize {
     millis.div_euclid(HOUR_MILLIS).rem_euclid(24) as usize
 }
 

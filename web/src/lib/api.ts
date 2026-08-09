@@ -107,6 +107,14 @@ export interface FamiliarState {
   cadence_hours: number;
   /** `null` for an adult, which has nowhere left to grow. */
   growth: { toward: string; percent: number } | null;
+  /**
+   * The one thing worth saying, or `null` on an ordinary day.
+   *
+   * A finished sentence in the pet's own voice — render it, do not assemble it.
+   * Nothing here addresses a reader, because the same line has to work on
+   * youwin.dev where strangers read it.
+   */
+  speech: string | null;
 }
 
 export class ApiError extends Error {

@@ -1,10 +1,16 @@
-//! The archive's own rhythm, measured in the units the writer actually works in.
+//! What this writer's own habits look like, measured in the units they work in.
 //!
-//! Everything about the pet that involves waiting — how fast energy decays, how
-//! much one new post is worth — has to be judged against how often this
-//! particular person writes. Measuring that badly is not a cosmetic problem: it
-//! decides whether an ordinary Wednesday reads as a normal quiet stretch or as
-//! abandonment.
+//! Everything about the pet that compares the present to the past — how fast
+//! energy decays, how much one new post is worth, whether anything that just
+//! happened is worth remarking on — has to be judged against this particular
+//! person. Eight hours is an ordinary afternoon for one archive and a
+//! disappearance for another; four hundred words is a monologue from someone who
+//! writes in fragments and a Tuesday from someone who does not.
+//!
+//! Three distributions, all built the same way. **Gaps** between sittings set the
+//! decay curve. **Sitting sizes** say whether a run of posts is a burst. **Words
+//! per post** say whether something was long. [`speech`](super::speech) reads all
+//! three; [`energy`](super::energy) and [`stats`](super::stats) read the first.
 //!
 //! Two ideas do the work.
 //!
@@ -16,23 +22,21 @@
 //! from Monday morning to the following weekend — while doing exactly what they
 //! had always done. Sessions are the unit because sessions are the behaviour.
 //!
-//! **Order statistics, not moments.** Gaps between sittings span orders of
-//! magnitude and lean hard to the right: a fortnight away is one number among a
-//! hundred ordinary evenings, and a mean is hostage to it. Quantiles are not, and
-//! they are read straight off the sorted sample without assuming the gaps are
-//! distributed in any particular shape — which they are not.
+//! **Order statistics, not moments.** These quantities span orders of magnitude
+//! and lean hard to the right: a fortnight away is one number among a hundred
+//! ordinary evenings, and a mean is hostage to it. Quantiles are not, and they
+//! are read straight off the sorted sample without assuming any particular shape.
 //!
 //! This did start out as a median and a spread taken in log space, on the theory
 //! that log-gaps are roughly normal. Two things killed it. Quantiles are
-//! invariant under any monotone transform, so the logarithm changed nothing about
-//! the two numbers below; and the median absolute deviation, the robust spread it
-//! used, collapses to exactly zero once more than half the gaps are identical —
-//! which is the common case of somebody who writes most days and occasionally
-//! disappears for a week. That writer would have been handed a spread of nothing
-//! and no tolerance at all, which is precisely backwards.
+//! invariant under any monotone transform, so the logarithm changed nothing; and
+//! the median absolute deviation, the robust spread it used, collapses to exactly
+//! zero once more than half the values are identical — the common case of
+//! somebody who writes most days and disappears for a week now and then. That
+//! writer would have been handed no tolerance at all, which is backwards.
 //!
-//! Nothing here is stored, and nothing here needs `now`: a rhythm is a property
-//! of the posts, not of the moment they are being read at.
+//! Nothing here is stored, and nothing here needs `now`: a habit is a property of
+//! the posts, not of the moment they are being read at.
 
 use crate::familiar::Morsel;
 
@@ -44,62 +48,143 @@ use crate::familiar::Morsel;
 /// did something else.
 const SESSION_GAP_MINUTES: f64 = 45.0;
 
-/// How many of the most recent gaps between sittings the rhythm is read from.
+/// How many of the most recent observations each distribution is read from.
 ///
 /// A count rather than a time window, which is what makes it self-scaling: for
-/// someone who writes hourly this is most of a day and a change of habit shows up
-/// within one, and for someone who writes weekly it is four months of habit. No
-/// window measured in days can do both — seven days holds a single gap for the
+/// someone who writes hourly, sixteen gaps is most of a day and a change of habit
+/// shows up within one; for someone who writes weekly it is four months of habit.
+/// No window measured in days can do both — seven days holds a single gap for the
 /// weekly writer, which is not a distribution at all, and that failure is the
 /// whole reason this module exists.
-const GAP_SAMPLE: usize = 16;
+///
+/// It is also the resolution limit on how surprised anything downstream is
+/// allowed to be, which is why [`super::speech`] can see it. See
+/// [`Sample::at_least`].
+pub const SAMPLE: usize = 16;
 
 /// The rhythm assumed for an archive with nothing to measure yet: one sitting, or
 /// none. Six hours is a working day with a couple of visits in it.
 pub const FALLBACK_GAP_HOURS: f64 = 6.0;
 
-/// How often this archive is written, and how regularly.
+/// The standard normal's 75th percentile is not used here — the upper quartile is
+/// read straight off the sample. Named for the one place a quantile is asked for
+/// by a name rather than a number.
+const UPPER_QUARTILE: f64 = 0.75;
+
+/// One distribution, as its most recent [`SAMPLE`] observations, sorted.
 ///
-/// Two points on the writer's own distribution of gaps, which between them answer
-/// both questions any waiting calculation needs to ask: *how long is a normal gap
-/// for this person*, and *how long is a long one*.
-///
-/// `Copy`, like [`super::PetState`]: it is two floats, and there is no reason for
-/// a caller to think about ownership of a measurement.
+/// A fixed array rather than a `Vec` so the whole [`Baseline`] is one flat value
+/// with no allocation behind it, which is what lets it be built cheaply inside
+/// three separate callers rather than threaded through their signatures.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Sample {
+    values: [f64; SAMPLE],
+    len: usize,
+}
+
+impl Sample {
+    /// The most recent `SAMPLE` of `values`, in the order they happened.
+    fn of(values: &[f64]) -> Self {
+        let recent = &values[values.len().saturating_sub(SAMPLE)..];
+
+        let mut sample = Self {
+            values: [0.0; SAMPLE],
+            len: recent.len(),
+        };
+        sample.values[..recent.len()].copy_from_slice(recent);
+        sample.values[..recent.len()].sort_by(f64::total_cmp);
+        sample
+    }
+
+    fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    /// The `p` quantile, interpolating linearly between the two order statistics
+    /// it falls between. `None` for an empty sample.
+    ///
+    /// The convention R and NumPy both default to. With sixteen observations at
+    /// most, which definition of "the 75th percentile" is chosen actually moves
+    /// the number, and picking the common one means it can be checked against
+    /// anything else.
+    fn quantile(self, p: f64) -> Option<f64> {
+        if self.is_empty() {
+            return None;
+        }
+
+        let position = p * (self.len - 1) as f64;
+        let below = position.floor() as usize;
+        let above = position.ceil() as usize;
+
+        Some(self.values[below] + (self.values[above] - self.values[below]) * (position - below as f64))
+    }
+
+    /// The probability that an observation from this writer's history is at least
+    /// `value` — the tail this sample says the present sits in.
+    ///
+    /// Laplace-smoothed, `(count + 1) / (n + 1)`, which matters more than it
+    /// looks. An unsmoothed count of zero says "this has never happened and never
+    /// could", and `-log2(0)` is infinite: one unprecedented post would out-shout
+    /// everything the pet could ever say again. Sixteen observations cannot tell
+    /// one-in-twenty from one-in-ever, and the smoothing is that admission — the
+    /// rarest thing this can report is a shade under one in seventeen.
+    ///
+    /// An empty sample has nothing to be surprised by, so everything is ordinary.
+    fn at_least(self, value: f64) -> f64 {
+        if self.is_empty() {
+            return 1.0;
+        }
+
+        let count = self.values[..self.len].iter().filter(|held| **held >= value).count();
+        (count as f64 + 1.0) / (self.len as f64 + 1.0)
+    }
+}
+
+/// How often this archive is written, how much lands each time, and how long the
+/// pieces are.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Baseline {
-    typical_hours: f64,
-    long_hours: f64,
+    gaps: Sample,
+    sittings: Sample,
+    words: Sample,
+    /// Posts in the most recent sitting — the observation `sittings` is there to
+    /// judge. Held here so the clustering runs once.
+    latest_sitting: usize,
 }
 
 impl Default for Baseline {
     fn default() -> Self {
         Self {
-            typical_hours: FALLBACK_GAP_HOURS,
-            long_hours: FALLBACK_GAP_HOURS,
+            gaps: Sample::of(&[]),
+            sittings: Sample::of(&[]),
+            words: Sample::of(&[]),
+            latest_sitting: 0,
         }
     }
 }
 
 impl Baseline {
-    /// Reads the rhythm out of an archive. `posts` must be sorted oldest first,
+    /// Reads the habits out of an archive. `posts` must be sorted oldest first,
     /// which is how `db::familiar::all` returns them.
     ///
     /// An archive with fewer than two sittings has no gap to measure and falls
     /// back rather than inventing one — the same thing the pet does on its first
     /// day, and it is corrected by the second sitting.
     pub fn of(posts: &[Morsel]) -> Self {
-        let gaps = session_gap_hours(posts);
-        let mut recent: Vec<f64> = gaps[gaps.len().saturating_sub(GAP_SAMPLE)..].to_vec();
+        let sittings = sittings(posts);
 
-        if recent.is_empty() {
-            return Self::default();
-        }
-        recent.sort_by(f64::total_cmp);
+        let gaps: Vec<f64> = sittings
+            .windows(2)
+            .map(|pair| hours(pair[1].0 - pair[0].0))
+            .collect();
+        let sizes: Vec<f64> = sittings.iter().map(|(_, posts)| *posts as f64).collect();
+        let words: Vec<f64> = posts.iter().map(|post| words(post) as f64).collect();
 
         Self {
-            typical_hours: quantile(&recent, 0.50),
-            long_hours: quantile(&recent, 0.75),
+            gaps: Sample::of(&gaps),
+            sittings: Sample::of(&sizes),
+            words: Sample::of(&words),
+            latest_sitting: sittings.last().map_or(0, |(_, posts)| *posts),
         }
     }
 
@@ -107,8 +192,8 @@ impl Baseline {
     ///
     /// The middle of their own distribution rather than an average of it, so one
     /// sleepless fortnight does not move it.
-    pub fn typical_gap_hours(self) -> f64 {
-        self.typical_hours
+    pub fn typical_gap_hours(&self) -> f64 {
+        self.gaps.quantile(0.50).unwrap_or(FALLBACK_GAP_HOURS)
     }
 
     /// The gap this writer exceeds about a quarter of the time.
@@ -122,48 +207,60 @@ impl Baseline {
     ///
     /// One number covers three orders of magnitude of posting habit, which is why
     /// it replaced a hand-picked multiple of the mean.
-    pub fn long_gap_hours(self) -> f64 {
-        self.long_hours
+    pub fn long_gap_hours(&self) -> f64 {
+        self.gaps.quantile(UPPER_QUARTILE).unwrap_or(FALLBACK_GAP_HOURS)
+    }
+
+    /// Posts in the most recent sitting.
+    pub fn latest_sitting_posts(&self) -> usize {
+        self.latest_sitting
+    }
+
+    /// How unusual a silence of `hours` is: the share of this writer's gaps that
+    /// ran at least this long.
+    pub fn gap_at_least(&self, hours: f64) -> f64 {
+        self.gaps.at_least(hours)
+    }
+
+    /// How unusual a sitting of `posts` is.
+    pub fn sitting_at_least(&self, posts: usize) -> f64 {
+        self.sittings.at_least(posts as f64)
+    }
+
+    /// How unusual a post of `words` is.
+    pub fn words_at_least(&self, words: usize) -> f64 {
+        self.words.at_least(words as f64)
     }
 }
 
-/// Hours between the starts of consecutive sittings.
+/// The sittings in an archive: when each began, and how many posts it holds.
 ///
 /// A post starts a new sitting when more than [`SESSION_GAP_MINUTES`] separates
-/// it from the one before. Every gap this returns is therefore larger than that
-/// threshold and comfortably positive, which is what makes the logarithms above
-/// safe — including for two posts that share a timestamp, which are one sitting
-/// by the same rule.
-fn session_gap_hours(posts: &[Morsel]) -> Vec<f64> {
-    let mut starts: Vec<i64> = Vec::new();
+/// it from the one before. Every gap between consecutive starts is therefore
+/// larger than that threshold and comfortably positive — including for two posts
+/// that share a timestamp, which are one sitting by the same rule.
+fn sittings(posts: &[Morsel]) -> Vec<(i64, usize)> {
+    let mut sittings: Vec<(i64, usize)> = Vec::new();
     let mut previous: Option<i64> = None;
 
     for post in posts {
         let at = post.created_at;
-        if previous.is_none_or(|before| minutes(at - before) > SESSION_GAP_MINUTES) {
-            starts.push(at);
+
+        match sittings.last_mut() {
+            Some((_, count)) if previous.is_some_and(|before| minutes(at - before) <= SESSION_GAP_MINUTES) => {
+                *count += 1;
+            }
+            _ => sittings.push((at, 1)),
         }
         previous = Some(at);
     }
 
-    starts
-        .windows(2)
-        .map(|pair| hours(pair[1] - pair[0]))
-        .collect()
+    sittings
 }
 
-/// The `p` quantile of an already-sorted, non-empty sample, interpolating
-/// linearly between the two order statistics it falls between.
-///
-/// The convention R and NumPy both default to. With sixteen gaps at most, which
-/// definition of "the 75th percentile" is chosen actually moves the number, and
-/// picking the common one means it can be checked against anything else.
-fn quantile(sorted: &[f64], p: f64) -> f64 {
-    let position = p * (sorted.len() - 1) as f64;
-    let below = position.floor() as usize;
-    let above = position.ceil() as usize;
-
-    sorted[below] + (sorted[above] - sorted[below]) * (position - below as f64)
+/// Words in a post, counted the way [`super::stats`] counts them.
+fn words(post: &Morsel) -> usize {
+    post.body_text.split_whitespace().count()
 }
 
 fn hours(millis: i64) -> f64 {
@@ -188,25 +285,23 @@ mod tests {
             .collect()
     }
 
-    /// `weeks` Sunday sittings of five posts each. The writer the old mean-gap
-    /// cadence could not see.
-    fn weekly_bursts(weeks: usize) -> Vec<Morsel> {
-        (0..weeks)
-            .flat_map(|week| sitting(START + week as i64 * 7 * DAY + 10 * HOUR, 5))
+    fn gap_hours(posts: &[Morsel]) -> Vec<f64> {
+        sittings(posts)
+            .windows(2)
+            .map(|pair| hours(pair[1].0 - pair[0].0))
             .collect()
     }
 
     #[test]
     fn a_handful_of_notes_in_one_go_is_a_single_sitting() {
-        assert!(session_gap_hours(&sitting(START, 5)).is_empty());
+        let one = sittings(&sitting(START, 5));
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].1, 5, "all five belong to it");
 
         // And the threshold is where it says it is: 45 minutes apart is still one
         // sitting, 46 is two.
-        let just_inside = [post(START, "a"), post(START + 45 * MINUTE, "b")];
-        assert!(session_gap_hours(&just_inside).is_empty());
-
-        let just_outside = [post(START, "a"), post(START + 46 * MINUTE, "b")];
-        assert_eq!(session_gap_hours(&just_outside).len(), 1);
+        assert_eq!(sittings(&[post(START, "a"), post(START + 45 * MINUTE, "b")]).len(), 1);
+        assert_eq!(sittings(&[post(START, "a"), post(START + 46 * MINUTE, "b")]).len(), 2);
     }
 
     #[test]
@@ -216,7 +311,7 @@ mod tests {
         let mut posts = sitting(START, 4);
         posts.extend(sitting(START + DAY, 4));
 
-        let gaps = session_gap_hours(&posts);
+        let gaps = gap_hours(&posts);
         assert_eq!(gaps.len(), 1);
         assert!((gaps[0] - 24.0).abs() < 1e-9, "{gaps:?}");
     }
@@ -225,29 +320,28 @@ mod tests {
     fn a_weekly_burst_writer_has_a_weekly_rhythm() {
         // The bug this module exists for. Under the mean gap between *posts* this
         // archive measured a cadence of five minutes; it is plainly a week.
-        let rhythm = Baseline::of(&weekly_bursts(8));
+        let posts: Vec<_> = (0..8)
+            .flat_map(|week| sitting(START + week as i64 * 7 * DAY + 10 * HOUR, 5))
+            .collect();
+        let habits = Baseline::of(&posts);
 
-        assert!(
-            (rhythm.typical_gap_hours() - 168.0).abs() < 1e-6,
-            "{} hours",
-            rhythm.typical_gap_hours(),
-        );
+        assert!((habits.typical_gap_hours() - 168.0).abs() < 1e-6, "{}", habits.typical_gap_hours());
+        assert_eq!(habits.latest_sitting_posts(), 5);
     }
 
     #[test]
     fn an_hourly_writer_has_an_hourly_rhythm() {
         // The other end of the range, through the same formula and constants.
-        let rhythm = Baseline::of(&run(START, 12, "a note"));
-        assert!((rhythm.typical_gap_hours() - 1.0).abs() < 1e-9);
+        let habits = Baseline::of(&run(START, 12, "a note"));
+        assert!((habits.typical_gap_hours() - 1.0).abs() < 1e-9);
+        assert_eq!(habits.latest_sitting_posts(), 1, "hourly posts are separate sittings");
     }
 
     #[test]
     fn regularity_decides_how_long_a_long_gap_is() {
         // A metronome: every sitting exactly a day apart. Nothing is forgiven
         // beyond the rhythm itself, because nothing ever varied from it.
-        let metronome: Vec<_> = (0..12)
-            .flat_map(|day| sitting(START + day * DAY, 2))
-            .collect();
+        let metronome: Vec<_> = (0..12).flat_map(|day| sitting(START + day * DAY, 2)).collect();
         let steady = Baseline::of(&metronome);
         assert!((steady.long_gap_hours() - steady.typical_gap_hours()).abs() < 1e-9);
 
@@ -280,12 +374,10 @@ mod tests {
         // the new habit, that is the rhythm — the old one is history.
         let mut posts = run(START, 40, "the old fast habit");
         let switched = START + 40 * HOUR;
-        posts.extend(
-            (0..20).map(|day| post(switched + day * DAY, "the new slow habit")),
-        );
+        posts.extend((0..20).map(|day| post(switched + day * DAY, "the new slow habit")));
 
-        let rhythm = Baseline::of(&posts);
-        assert!((rhythm.typical_gap_hours() - 24.0).abs() < 1e-9, "{}", rhythm.typical_gap_hours());
+        let habits = Baseline::of(&posts);
+        assert!((habits.typical_gap_hours() - 24.0).abs() < 1e-9, "{}", habits.typical_gap_hours());
     }
 
     #[test]
@@ -295,28 +387,71 @@ mod tests {
         let mut posts = vec![post(START, "before")];
         posts.extend(run(START + 365 * DAY, 12, "after"));
 
-        let rhythm = Baseline::of(&posts);
-        assert!((rhythm.typical_gap_hours() - 1.0).abs() < 1e-9, "{}", rhythm.typical_gap_hours());
+        assert!((Baseline::of(&posts).typical_gap_hours() - 1.0).abs() < 1e-9);
     }
 
     #[test]
     fn nothing_to_measure_falls_back_rather_than_inventing_a_number() {
         for archive in [vec![], vec![post(START, "the very first")], sitting(START, 6)] {
-            let rhythm = Baseline::of(&archive);
-            assert_eq!(rhythm.typical_gap_hours(), FALLBACK_GAP_HOURS);
-            assert_eq!(rhythm.long_gap_hours(), FALLBACK_GAP_HOURS);
+            let habits = Baseline::of(&archive);
+            assert_eq!(habits.typical_gap_hours(), FALLBACK_GAP_HOURS);
+            assert_eq!(habits.long_gap_hours(), FALLBACK_GAP_HOURS);
         }
     }
 
     #[test]
     fn the_quantile_interpolates_between_order_statistics() {
-        assert_eq!(quantile(&[1.0, 2.0, 3.0], 0.5), 2.0);
-        assert_eq!(quantile(&[1.0, 2.0, 3.0, 4.0], 0.5), 2.5);
-        assert_eq!(quantile(&[1.0, 2.0, 3.0, 4.0, 5.0], 0.75), 4.0);
+        assert_eq!(Sample::of(&[1.0, 2.0, 3.0]).quantile(0.5), Some(2.0));
+        assert_eq!(Sample::of(&[4.0, 1.0, 3.0, 2.0]).quantile(0.5), Some(2.5));
+        assert_eq!(Sample::of(&[5.0, 1.0, 2.0, 3.0, 4.0]).quantile(0.75), Some(4.0));
+        assert_eq!(Sample::of(&[7.0]).quantile(0.75), Some(7.0));
+        assert_eq!(Sample::of(&[]).quantile(0.5), None);
+    }
 
-        // The ends, and a sample of one.
-        assert_eq!(quantile(&[1.0, 2.0, 3.0], 0.0), 1.0);
-        assert_eq!(quantile(&[1.0, 2.0, 3.0], 1.0), 3.0);
-        assert_eq!(quantile(&[7.0], 0.75), 7.0);
+    #[test]
+    fn a_tail_probability_never_reaches_zero_or_exceeds_one() {
+        let sample = Sample::of(&[1.0, 2.0, 3.0, 4.0]);
+
+        // Everything is at least the smallest value.
+        assert_eq!(sample.at_least(0.0), 1.0);
+        // One of four is at least 4, smoothed to two in five.
+        assert!((sample.at_least(4.0) - 0.4).abs() < 1e-9);
+
+        // The point of the smoothing: unprecedented is rare, not impossible. An
+        // unsmoothed zero here is infinitely surprising and would out-shout
+        // everything the pet could ever say again.
+        let unprecedented = sample.at_least(1_000.0);
+        assert!(unprecedented > 0.0, "an unseen value must not be impossible");
+        assert!((unprecedented - 0.2).abs() < 1e-9);
+
+        // And a sample with no history is never surprised.
+        assert_eq!(Sample::of(&[]).at_least(1_000.0), 1.0);
+    }
+
+    #[test]
+    fn the_rarest_thing_a_full_sample_can_report_is_one_in_seventeen() {
+        // The resolution limit, stated once so the ceiling in `speech` has a
+        // reason rather than a taste behind it.
+        let full = Sample::of(&(0..SAMPLE).map(|i| i as f64).collect::<Vec<_>>());
+        assert_eq!(full.len, SAMPLE);
+
+        let rarest = full.at_least(f64::INFINITY);
+        assert!((rarest - 1.0 / (SAMPLE as f64 + 1.0)).abs() < 1e-9, "{rarest}");
+    }
+
+    #[test]
+    fn sitting_sizes_and_word_counts_are_measured_too() {
+        let mut posts = sitting(START, 3);
+        posts.extend(sitting(START + DAY, 7));
+        let habits = Baseline::of(&posts);
+
+        assert_eq!(habits.latest_sitting_posts(), 7);
+        // Two sittings, of three and seven. Seven is the larger of the two.
+        assert!(habits.sitting_at_least(7) < habits.sitting_at_least(3));
+
+        // Every fixture post is "another note" — two words — so a longer one is
+        // unlike anything in the archive.
+        let long: Vec<_> = (0..40).map(|_| "word").collect();
+        assert!(habits.words_at_least(long.len()) < habits.words_at_least(2));
     }
 }

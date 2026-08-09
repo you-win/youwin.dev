@@ -17,10 +17,11 @@
 //! | [`Phase`] | this hour against the learned posting rhythm | an energy offset |
 //!
 //! The module is split so each piece can be tested on its own: [`topics`] and
-//! [`mood`] read text, [`baseline`] measures how often this archive is written
-//! and [`energy`] reads clocks against it, [`render`] turns state into glyphs,
-//! [`stats`] derives the numbers under the picture, and [`cache`] holds the
-//! five-minute snapshot the public site actually serves.
+//! [`mood`] read text, [`baseline`] measures this writer's own habits and
+//! [`energy`] reads clocks against them, [`render`] turns state into glyphs,
+//! [`speech`] finds the one thing worth saying about all of it, [`stats`] derives
+//! the numbers under the picture, and [`cache`] holds the five-minute snapshot
+//! the public site actually serves.
 //!
 //! Every "how long has it been" question in here is asked of [`baseline`] rather
 //! than of the clock, because the answer only means anything relative to the
@@ -32,9 +33,11 @@ pub mod cache;
 pub mod energy;
 pub mod mood;
 pub mod render;
+pub mod speech;
 pub mod stats;
 pub mod topics;
 
+pub use baseline::Baseline;
 pub use cache::{Familiar, Reading};
 
 /// The mood a post was written in. Owned by the crate, not by the pet — see

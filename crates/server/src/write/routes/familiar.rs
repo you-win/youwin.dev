@@ -53,6 +53,10 @@ pub struct FamiliarDto {
     cadence_hours: f64,
     /// Absent for an adult, which has nowhere left to grow.
     growth: Option<GrowthDto>,
+    /// The one thing worth saying, or absent on an ordinary day. Already a
+    /// finished sentence in the pet's own voice — the client renders it, it does
+    /// not assemble it.
+    speech: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -79,6 +83,7 @@ impl From<&Reading> for FamiliarDto {
             streak_days: reading.vitals.streak_days,
             streak_alive: reading.vitals.streak_alive,
             cadence_hours: reading.vitals.cadence_hours,
+            speech: reading.speech.as_ref().map(|said| said.line.clone()),
             growth: state
                 .stage
                 .next()

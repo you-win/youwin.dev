@@ -169,13 +169,24 @@ export default function Familiar(props: Props) {
               <Show
                 when={previewing()}
                 fallback={
-                  <>
-                    {pet().posts} posts
-                    <Show when={pet().streak_alive && pet().streak_days > 1}>
-                      {" · "}
-                      {pet().streak_days} day streak 🔥
-                    </Show>
-                  </>
+                  // Speech displaces the counts rather than adding a line, the
+                  // same way it does on the public feed — it only appears when
+                  // something is genuinely unusual, and the two surfaces saying
+                  // it differently would be two rules to keep true.
+                  <Show
+                    when={pet().speech}
+                    fallback={
+                      <>
+                        {pet().posts} posts
+                        <Show when={pet().streak_alive && pet().streak_days > 1}>
+                          {" · "}
+                          {pet().streak_days} day streak 🔥
+                        </Show>
+                      </>
+                    }
+                  >
+                    {(said) => <>{said()}</>}
+                  </Show>
                 }
               >
                 {note()}

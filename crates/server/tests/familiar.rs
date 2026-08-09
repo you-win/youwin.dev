@@ -205,6 +205,42 @@ async fn the_familiar_page_renders_the_pet_and_its_sheet(pool: SqlitePool) {
 }
 
 #[sqlx::test]
+async fn the_pet_speaks_on_both_public_surfaces_when_it_has_something_to_say(pool: SqlitePool) {
+    // Twenty days of a daily note, all of it comfortably behind us, and then
+    // nothing. These routes read the real clock, so the archive has to be dated
+    // *backwards* from the fixture epoch — posts in the future are invisible to
+    // `compute`, which would leave a very different archive than the one this
+    // test means to describe.
+    //
+    // A silence of a fortnight-plus against a daily rhythm is unlike anything in
+    // this writer's history, which is the whole condition for saying anything.
+    // It only gets more true as real time moves on.
+    for day in 0..20 {
+        let days_before_epoch = 30 - day;
+        post_at(&pool, "another note about rust", -days_before_epoch * 24, Visibility::Public).await;
+    }
+
+    let app = app(pool);
+    let (_, feed) = get(&app, "/").await;
+    let (_, sheet) = get(&app, "/familiar").await;
+
+    // Both surfaces draw from one snapshot, so either both carry the line or
+    // neither does — a widget that disagrees with the page it links to is the
+    // failure this shares a `Reading` to prevent.
+    let on_feed = feed.contains("it has not been fed");
+    let on_sheet = sheet.contains("it has not been fed");
+    assert_eq!(on_feed, on_sheet, "the widget and the sheet disagree");
+    assert!(on_feed, "twenty days of daily notes and then nothing: {feed}");
+
+    // And it is the pet talking, never the page addressing whoever is reading.
+    for page in [&feed, &sheet] {
+        let lowered = page.to_lowercase();
+        assert!(!lowered.contains("you have not"), "the pet addressed the reader");
+        assert!(!lowered.contains("your archive"), "the pet addressed the reader");
+    }
+}
+
+#[sqlx::test]
 async fn the_familiar_page_stands_up_with_no_posts_at_all(pool: SqlitePool) {
     let (status, body) = get(&app(pool), "/familiar").await;
 

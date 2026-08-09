@@ -104,11 +104,16 @@ count as one burst must never be counted as two separate visits to the composer.
 ### Order statistics, not moments
 
 Gaps between sittings span orders of magnitude and lean hard to the right — a fortnight away is
-one number among a hundred ordinary evenings, and a mean is hostage to it. The baseline is two
-quantiles of the most recent sixteen gaps:
+one number among a hundred ordinary evenings, and a mean is hostage to it. The decay curve is
+set by two quantiles of the most recent sixteen gaps:
 
 - **typical gap** — the median. The rhythm the writer is working to.
 - **long gap** — the 75th percentile. The gap they exceed about a quarter of the time.
+
+The module holds **three** such distributions, all built the same way and all sixteen long: gaps
+between sittings, posts per sitting, and words per post. Only the first was built at first,
+because only the first had a caller; [speech](#speech) is the caller the other two were waiting
+for, and it reads all three as tails rather than as quantiles.
 
 A **count** of gaps rather than a time window is what makes it self-scaling. Sixteen gaps is
 most of a day for someone who writes hourly, and four months of habit for someone who writes
@@ -186,17 +191,73 @@ cold-start value instead. The composer was wrong about every post, in the one di
 makes the feature pointless. Staleness and the carried energy are therefore separate: a write
 marks the snapshot for recomputation and leaves the state it carries alone.
 
+## Speech
+
+*Implemented in [`familiar/speech.rs`](crates/server/src/familiar/speech.rs).*
+
+One line, and the rule that picks it: **the pet says the most surprising true thing about the
+archive.** A shuffled table of stock phrases is dynamic for a week and wallpaper after that,
+because the interesting sentence is never the one that is always available. "47 posts" is true
+every day and worth saying on none of them.
+
+**Every candidate reports a tail, not a score.** Each one answers the same question — what is
+the probability the archive would look *at least this extreme*, under this writer's own history
+— and the least likely observation wins. That shared meaning is the only thing making two
+candidates comparable; a hand-assigned weight anywhere would quietly become the real ranking.
+
+**The floor is load-bearing.** Below two bits — one in four — the pet says nothing at all. A pet
+that always has a line spends most of its life saying something dull, and one dull line teaches
+you to stop reading the interesting ones. Silence on an ordinary day is the feature.
+
+**The ceiling is an admission.** The samples behind these tails are sixteen observations long,
+so the rarest thing they can honestly report is a shade under one in seventeen. Surprise is
+capped there rather than running away. `Sample::at_least` is Laplace-smoothed for the same
+reason: an unsmoothed count of zero says "never, and never could", and `−log2(0)` is infinite —
+one unprecedented post would out-shout everything the pet could ever say again. A useful side
+effect is that no dimension can monopolise the line; once two candidates are both pinned at the
+ceiling they take turns, by the day, chosen by a hash so the rotation does not march predictably
+as the days do.
+
+**Creature voice, everywhere.** Nothing addresses a reader. The public widget is read by
+strangers, so a line in the second person would be telling *them* about someone else's habits,
+and one register means one table to keep true instead of two. The pet is "it", the archive is
+what it eats, the writer is never spoken to. A test pins this, because it is exactly the kind of
+rule that erodes one convenient phrasing at a time.
+
+Five candidates, one per dimension the pet already reads: **silence** against the gap
+distribution, **abundance** against sitting sizes, **length** against words per post, **odd
+hour** against the circadian profile, and **rare mood** against the archive's mood split.
+Everything except silence describes the last thing written, so it is gated on that post still
+being recent by the writer's own definition — one typical gap.
+
+**Odd hour needs a gate the others do not**, and the difference is worth stating because it will
+come up again. Every other tail is smoothed against a sample that is simply *empty* early on,
+which returns a probability of one and falls under the floor by itself. Odd hour is judged
+against the circadian profile, which is a **blend of evidence and an assumed human schedule** —
+a prior, not an observation. Ungated it announced that a single midnight post came at an odd
+hour, having never seen the writer at any hour at all. It now needs a fortnight (when the guess
+has finished being displaced) and a full sample of posts (below which a histogram of three
+spikes makes the other twenty-one hours unusual by default).
+
+Speech **displaces** the stats line on the feed widget and in the composer rather than adding a
+line — it only appears when something is genuinely unusual, the numbers it covers are all on
+`/familiar` anyway, and a widget that grew a line on interesting days would reflow the feed
+under it. On `/familiar` it sits under the picture, where the pet is the subject.
+
+It lives on the `Reading`, not on each surface, so the widget, the sheet and the composer cannot
+say three different things about one moment — and so the day-rotation lands on one answer per
+snapshot.
+
 ## What comes next
 
 None of this is built. Ordered by how much dynamism they buy per unit of code, and every one of
 them holds the invariants above.
 
-**Speech, ranked by surprise.** One line under the pet, and the rule is that *it says the most
-surprising true thing about you*. Score each candidate observation by its information content
-under the baseline — `−log P(observation)` — and say the highest. "47 posts" is always true and
-scores nothing. "Quietest week since April" is rare, and therefore worth saying. This is the
-largest perceived-dynamism win per line of code in the list, and the baseline is what makes the
-selection principled rather than a shuffled table of stock phrases.
+**A diet-shift candidate.** The sixth line speech should have, held back from the first cut
+because it is the one needing new maths: compare the recent window's topic mix against the
+long-run diet and report the divergence — "it has eaten nothing but tech lately". The tail is a
+binomial one, `P(X ≥ k)` for `n` recent posts at the long-run share, which is a small exact loop
+and fits the existing contract without stretching it.
 
 **The chronicle.** The pet has no memory of itself: everything is computed from *now* looking
 backwards. Replaying `compute` across the archive recovers its whole biography — when it
