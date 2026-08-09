@@ -58,13 +58,35 @@ const [rejected, setRejected] = createSignal<Queued[]>([]);
 
 export { queued, rejected };
 
-/** Called with each post that makes it out, so the feed can show the real one. */
-type Listener = (post: Awaited<ReturnType<typeof api.create>>) => void;
+/**
+ * Called with each post that makes it out, and the queue entry it came from.
+ *
+ * The entry is what carries `parentId`. A `Post` says only whether it *is* a
+ * reply, not what to, so without this the feed could not tell which thread root
+ * to bump and would have to guess or refetch.
+ */
+type Listener = (post: Awaited<ReturnType<typeof api.create>>, item: Queued) => void;
 const listeners = new Set<Listener>();
 
 export function onFlushed(listener: Listener) {
   listeners.add(listener);
   return () => listeners.delete(listener);
+}
+
+/**
+ * Queued posts that start their own thread.
+ *
+ * The feed lists roots, so it shows these; a queued *reply* is shown inside the
+ * post it answers, which is where it will appear once it lands. Both read the
+ * same signal, so a post is in exactly one of the two lists.
+ */
+export function queuedRoots(): Queued[] {
+  return queued().filter((item) => item.parentId === undefined);
+}
+
+/** Queued replies to one post, oldest first. */
+export function queuedRepliesTo(parentId: string): Queued[] {
+  return queued().filter((item) => item.parentId === parentId);
 }
 
 interface Stored {
@@ -181,7 +203,7 @@ export async function flush(): Promise<void> {
 
         setQueued((current) => current.filter((q) => q.key !== item.key));
         persist();
-        for (const listener of listeners) listener(post);
+        for (const listener of listeners) listener(post, item);
       } catch (error) {
         if (error instanceof NetworkError) {
           // Still offline. Everything stays queued, in order, and the next

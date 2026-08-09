@@ -123,10 +123,22 @@ export default function Composer(props: Props) {
   const submit = async () => {
     if (empty() || overHard() || busy()) return;
 
+    // Read before awaiting: a reply composer is unmounted by its own onSubmit,
+    // and props are getters on a proxy that outlives nothing.
+    const key = props.draftKey;
+
     setBusy(true);
     setError(null);
     try {
       await props.onSubmit(body(), visibility(), mood());
+
+      // Cleared directly rather than left to the effect above. `onSubmit` can
+      // unmount this component — the reply box closes itself on success — and a
+      // disposed component's effects do not run, so `setBody("")` below would
+      // never reach storage. The stale draft then reappears the next time the
+      // reply box is opened on that post, over the reply that was already sent.
+      saveDraft(key, "");
+
       setBody("");
       setVisibility("public");
       setMood(null);

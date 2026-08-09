@@ -1,8 +1,9 @@
 import { A, useParams } from "@solidjs/router";
-import { createResource, createSignal, For, Show } from "solid-js";
+import { createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 
 import PostCard from "../components/PostCard";
 import { api, type Post } from "../lib/api";
+import { onFlushed } from "../lib/outbox";
 
 /**
  * The gutter for one nesting level, mirroring `indent` in
@@ -65,6 +66,21 @@ export default function Permalink() {
   // tree living in the client. The resource keeps showing the old thread while
   // this is in flight, so nothing flashes.
   const reload = () => void refetch();
+
+  onMount(() => {
+    // A reply written offline is shown by its parent's card while it waits.
+    // Once it lands it is a real post with a real place in the tree, and only
+    // the server knows where — so this asks, for exactly the same reason
+    // `reload` does after a reply posted normally.
+    onCleanup(
+      onFlushed((_post, item) => {
+        if (item.parentId === undefined) return;
+        // Cheap, and correct even when the flushed reply answers a post
+        // elsewhere in this thread rather than the one at its head.
+        void refetch();
+      }),
+    );
+  });
 
   return (
     <div class="flex flex-col gap-3">

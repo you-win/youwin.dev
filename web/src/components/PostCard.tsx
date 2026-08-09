@@ -1,8 +1,9 @@
 import { A } from "@solidjs/router";
-import { createSignal, Show } from "solid-js";
+import { createSignal, For, Show } from "solid-js";
 
 import {
   api,
+  NetworkError,
   previewUrl,
   share,
   type Mood,
@@ -10,6 +11,7 @@ import {
   type Visibility,
 } from "../lib/api";
 import { absolute, relative } from "../lib/format";
+import { enqueue, queuedRepliesTo } from "../lib/outbox";
 import Composer from "./Composer";
 
 interface Props {
@@ -79,8 +81,18 @@ export default function PostCard(props: Props) {
     _visibility: Visibility,
     mood: Mood | null,
   ) => {
-    const created = await api.create(body, "public", mood, props.post.id);
-    props.onReply?.(created);
+    try {
+      const created = await api.create(body, "public", mood, props.post.id);
+      props.onReply?.(created);
+    } catch (e) {
+      // Same bargain the feed's composer makes: there is no server to have
+      // refused this, so it is not the composer's problem. Queue it and return
+      // normally — the box closes and the reply appears below, waiting.
+      // Anything the server *did* answer is rethrown, which keeps the text in
+      // the box and says why.
+      if (!(e instanceof NetworkError)) throw e;
+      enqueue(body, "public", mood, props.post.id);
+    }
     setReplying(false);
   };
 
@@ -261,6 +273,32 @@ export default function PostCard(props: Props) {
             </button>
           </Show>
         </footer>
+      </Show>
+
+      {/* Replies written with no connection, shown where they will land rather
+          than in a list somewhere else. Inside the card for the same reason the
+          reply composer is: this is the post they belong to, and on the
+          permalink a real reply is a sibling at depth+1, which the indent here
+          approximates without pretending to be part of the server's tree.
+
+          Not shown on a `pending` card — that post has no id yet, so nothing
+          can have been queued against it. */}
+      <Show when={!props.pending && queuedRepliesTo(props.post.id).length > 0}>
+        <div class="mt-3 flex flex-col gap-2">
+          <For each={queuedRepliesTo(props.post.id)}>
+            {(item) => (
+              <div class="ml-3 rounded-box border border-base-300 bg-base-100/40 p-3 opacity-60 sm:ml-4">
+                <p class="mb-1 text-sm text-secondary">
+                  Reply · waiting for a connection
+                </p>
+                {/* Rendering is the server's job, so the raw text stands in —
+                    honest about what it is, and the layout does not jump when
+                    the real one arrives. */}
+                <div class="post-body whitespace-pre-wrap">{item.body}</div>
+              </div>
+            )}
+          </For>
+        </div>
       </Show>
 
       <Show when={replying()}>

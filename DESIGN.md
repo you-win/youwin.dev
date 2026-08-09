@@ -917,6 +917,26 @@ composer now persists its text on every keystroke, under a per-composer key. The
 composer deliberately has none: its starting text is already on the server, and a stored
 copy would mean an abandoned edit reappearing over the published post days later.
 
+**Replies queue on the same terms, and appear in a different place.** A queued reply is
+shown inside the post it answers — where it will be once it lands, and where the reply
+composer already opens — rather than in a list at the top of the feed. It does not bump
+the parent's reply count while it waits, because that count is the server's and nothing
+has been written yet; the bump happens on the flush, from the queue entry rather than the
+returned post, since a `PostDto` says only that something *is* a reply and not what to.
+
+A **rejection** goes the other way: those surface on the feed wherever they came from,
+with a link to the post the reply was for. The asymmetry is deliberate. A queued reply
+needs no decision and belongs in context; a rejection needs one, and a rejection
+reachable only by navigating back to the right permalink is one nobody makes.
+
+Wiring that up found a bug in the keystroke persistence above. A reply composer is
+unmounted by its own `onSubmit` — the box closes itself on success — so by the time
+`setBody("")` ran, the effect that writes to storage had already been disposed, and the
+draft survived a *successful* reply. The next time that reply box was opened it restored
+text that had already been posted. It is cleared explicitly now, before the signal
+update, which is the right shape anyway: the effect is for keystrokes, and clearing on
+success is an action rather than a consequence.
+
 Background Sync would let the worker flush with the app closed, but `generateSW` cannot
 register a sync handler without switching to `injectManifest` and hand-writing the worker.
 For a queue that exists to survive a train tunnel, "sends when you next open it" is the
@@ -1204,7 +1224,7 @@ simply finishes.
 | **M6** | The Familiar | ✅ **Done.** The whole state machine — topics, mood, energy decay and bursts, learned circadian phase, growth stages, pose triggers — plus compositional kaomoji rendering, the character sheet, and the five-minute snapshot. On the feed and at `/familiar`. 178 tests green |
 | **M7** | Mood as a field | ✅ **Done.** `posts.mood`, a picker in the composer, and `0003` backfilling the hashtags that used to carry it. Hashtags are ordinary tags again; keyword inference stays as the fallback for a post with nothing picked. 190 tests green |
 | **M8** | A familiar worth coming back to | 🚧 **In progress.** [`familiar-design.md`](familiar-design.md) is the spec, rewritten against the code and no longer a dangling reference. `familiar::baseline` landed first: sittings instead of posts, quantiles instead of means, and a decay half-life derived from the writer's own gap distribution — which fixes a pet that read every bursty writer as an absent one. Then the composer: `GET /api/familiar`, `POST /api/familiar/draft`, and a pet above the box that changes as you type. Then speech — one line, picked as the least likely true thing about the archive, in the pet's own voice on all three surfaces, and silence on an ordinary day. Then sparks — the pet's first transient: milestones that last a window instead of a single post, and a visible welcome back from a real absence. Then traits — the slow channel, and two of the three the spec asked for turned out to have been built already by the baseline and the phase profile, so what landed is the two places the pet was still one-size-fits-all: what one post is worth, and whether its hours mean anything. Still to come, in order: a diet-shift line, the chronicle, anticipation. 278 tests green |
-| **M9** | Ways back in, and out | ✅ **Done.** Five things the archive wanted once it was a year old rather than a week: the [date spine](#the-date-spine-m9) (`/archive`, `/archive/:year/:month`, `/on/:month/:day`) and `/random`; [off-site backup](#off-site-backup-m9) for `backup` and `export`, off unless configured; [offline composing](#offline-composing-m9) — an idempotency key on `POST /api/posts` (`0004`), a queue for posts written with no signal, and composer drafts that survive a reload; and a [mood timeline](#the-mood-timeline-m9) at `/moods`, which is the first thing to read `posts.mood` other than the pet. 323 tests green |
+| **M9** | Ways back in, and out | ✅ **Done.** Five things the archive wanted once it was a year old rather than a week: the [date spine](#the-date-spine-m9) (`/archive`, `/archive/:year/:month`, `/on/:month/:day`) and `/random`; [off-site backup](#off-site-backup-m9) for `backup` and `export`, off unless configured; [offline composing](#offline-composing-m9) — an idempotency key on `POST /api/posts` (`0004`), a queue for posts and replies written with no signal, and composer drafts that survive a reload; and a [mood timeline](#the-mood-timeline-m9) at `/moods`, which is the first thing to read `posts.mood` other than the pet. 323 tests green |
 
 The split changes the shape of the plan more than anything else: **M1 ships a complete,
 finished artifact** — a public archive at `youwin.dev` that works and is done — rather

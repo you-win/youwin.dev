@@ -1,3 +1,4 @@
+import { A } from "@solidjs/router";
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 
 import Composer from "../components/Composer";
@@ -14,7 +15,7 @@ import {
   discard,
   enqueue,
   onFlushed,
-  queued,
+  queuedRoots,
   rejected,
   type Queued,
 } from "../lib/outbox";
@@ -87,10 +88,24 @@ export default function Feed() {
     // other. Without this it would not appear until the next reload, which on an
     // app you leave open is a long time to wonder whether it sent.
     onCleanup(
-      onFlushed((post) => {
-        setPosts((existing) =>
-          existing.some((p) => p.id === post.id) ? existing : [post, ...existing],
-        );
+      onFlushed((post, item) => {
+        if (item.parentId === undefined) {
+          setPosts((existing) =>
+            existing.some((p) => p.id === post.id) ? existing : [post, ...existing],
+          );
+        } else {
+          // A reply never appears in the feed — this lists roots — so it lands
+          // as a bump on the count of the post it answered, exactly as one
+          // posted normally does. `item` is what knows which post that was;
+          // the returned Post says only that it *is* a reply.
+          setPosts((existing) =>
+            existing.map((p) =>
+              p.id === item.parentId
+                ? { ...p, reply_count: p.reply_count + 1 }
+                : p,
+            ),
+          );
+        }
         setRevision((n) => n + 1);
       }),
     );
@@ -175,13 +190,25 @@ export default function Feed() {
           Copy rather than "put it back in the composer": the composer restores
           its own draft at construction, so refilling it means forcing a remount
           — which would throw away whatever is being typed right now to recover
-          something that is already on screen and selectable. */}
+          something that is already on screen and selectable.
+
+          Replies land here too, unlike queued ones, which live inside the post
+          they answer. A rejection needs a decision, and one reachable only by
+          navigating to the right permalink is one nobody makes. */}
       <For each={rejected()}>
         {(item) => (
           <div class="rounded-box border border-error/40 bg-base-200 p-4">
             <p class="mb-2 text-sm text-error">
               This could not be posted: {item.error}
             </p>
+            <Show when={item.parentId}>
+              {(parent) => (
+                <p class="mb-2 text-sm text-secondary">
+                  It was a reply to{" "}
+                  <A href={`/p/${parent()}`}>this post</A>.
+                </p>
+              )}
+            </Show>
             <div class="post-body whitespace-pre-wrap">{item.body}</div>
             <div class="mt-3 flex gap-2">
               <button
@@ -211,7 +238,9 @@ export default function Feed() {
         )}
       </For>
 
-      <For each={queued()}>
+      {/* Roots only. A queued reply is shown inside the post it answers, by
+          PostCard, which is where it will be once it lands. */}
+      <For each={queuedRoots()}>
         {(item) => (
           <PostCard
             post={asPost(item)}
@@ -263,7 +292,7 @@ export default function Feed() {
         when={
           exhausted() &&
           posts().length === 0 &&
-          queued().length === 0 &&
+          queuedRoots().length === 0 &&
           !loading()
         }
       >
