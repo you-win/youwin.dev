@@ -308,9 +308,17 @@ fn base(form: Form, stage: Stage, level: Level) -> &'static str {
 
 /// The pet is asleep — deep in the hours it never writes in, with nothing left
 /// in the tank.
+///
+/// Gated on the archive keeping hours at all. `Deep` is whatever is left over
+/// after the phase cut names a densest four hours, and it names them for a flat
+/// histogram exactly as readily as for a habit — so for a writer who works at
+/// every hour equally, half the day is "deep" by arithmetic and the pet would
+/// spend it asleep on no evidence. See [`Traits::keeps_hours`].
+///
+/// [`Traits::keeps_hours`]: crate::familiar::Traits::keeps_hours
 fn sleep(state: &PetState) -> &'static str {
     match (state.phase, state.level) {
-        (Phase::Deep, Level::Bored | Level::Lethargic) => " zZ",
+        (Phase::Deep, Level::Bored | Level::Lethargic) if state.traits.keeps_hours() => " zZ",
         _ => "",
     }
 }
@@ -369,7 +377,10 @@ fn trinket(state: &PetState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::familiar::{Blend, Sparks, Topic, compute, fixture::START};
+    use crate::familiar::{
+        Blend, Sparks, Topic, Traits, compute,
+        fixture::{START, run},
+    };
 
     /// A state to poke holes in. Every field is set, so a test can change one
     /// and be sure it is the only thing that moved.
@@ -384,6 +395,7 @@ mod tests {
             energy: 0.6,
             level: Level::Active,
             phase: Phase::Active,
+            traits: Traits::default(),
             posts: 60,
             sparks: Sparks::default(),
             at: START,
@@ -488,6 +500,27 @@ mod tests {
         tired.phase = Phase::Peak;
         tired.level = Level::Bored;
         assert!(!kaomoji(&tired).flat().contains("zZ"));
+    }
+
+    #[test]
+    fn an_archive_with_no_hours_has_no_night_to_sleep_through() {
+        // `Deep` is whatever the phase cut had left over, and it has leftovers
+        // for a flat histogram exactly as readily as for a habit. A writer who
+        // works at every hour equally would otherwise spend half of every day
+        // drawn asleep, on a peak block that is arithmetic rather than evidence.
+        let mut scattered = compute(&[], None, START);
+        scattered.phase = Phase::Deep;
+        scattered.level = Level::Bored;
+
+        assert!(kaomoji(&scattered).flat().contains("zZ"), "an ordinary pet sleeps");
+
+        // A flat profile, and enough posts behind it that a character is read off
+        // them at all — what those posts say is irrelevant here, only how many
+        // there are.
+        scattered.traits = Traits::of(&run(START, 40, "a note"), &[1.0 / 24.0; 24]);
+
+        assert!(!scattered.traits.keeps_hours());
+        assert!(!kaomoji(&scattered).flat().contains("zZ"));
     }
 
     #[test]

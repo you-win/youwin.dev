@@ -16,6 +16,11 @@
 //! | [`Level`] | recency and cadence of posting | frame size, motion, sleep |
 //! | [`Phase`] | this hour against the learned posting rhythm | an energy offset |
 //!
+//! Underneath them is a slower channel, [`Traits`], which is a reading of the
+//! whole archive rather than of the present and changes how the pet *reacts*
+//! rather than what it shows: how much one post is worth, and whether the hours
+//! it keeps mean anything.
+//!
 //! The module is split so each piece can be tested on its own: [`topics`] and
 //! [`mood`] read text, [`baseline`] measures this writer's own habits and
 //! [`energy`] reads clocks against them, [`render`] turns state into glyphs,
@@ -37,10 +42,12 @@ pub mod spark;
 pub mod speech;
 pub mod stats;
 pub mod topics;
+pub mod traits;
 
 pub use baseline::Baseline;
 pub use cache::{Familiar, Reading};
 pub use spark::Sparks;
+pub use traits::Traits;
 
 /// The mood a post was written in. Owned by the crate, not by the pet — see
 /// [`crate::mood`].
@@ -399,6 +406,9 @@ pub struct PetState {
     pub energy: f64,
     pub level: Level,
     pub phase: Phase,
+    /// What kind of writer this is. The slow channel: it does not draw anything
+    /// on its own, it changes what the rest of this means.
+    pub traits: Traits,
     pub posts: usize,
     /// What the archive did recently enough to still be showing — the one field
     /// here that is not a steady-state reading of the present. See [`spark`].
@@ -437,15 +447,29 @@ pub fn compute(posts: &[Morsel], previous: Option<&PetState>, now: i64) -> PetSt
     // pass over the archive for nothing.
     let rhythm = Baseline::of(visible);
 
-    let phase = energy::phase_at(visible, now);
-    let base_energy = energy::step(visible, &rhythm, previous, now);
+    // Built once and shared for the same reason the rhythm is. The phase is a
+    // cut of this curve and the pet's focus is a measure of how much that cut
+    // means, so they have to be readings of one profile — two of them would let
+    // the pet be confident about hours it is not keeping.
+    let profile = energy::profile(visible, now);
+    let phase = energy::phase_in(&profile, now);
+    let character = Traits::of(visible, &profile);
+
+    let base_energy = energy::step(visible, &rhythm, character, previous, now);
 
     // The phase modifier is applied here, to the value about to be drawn, and is
     // never written back into `base_energy`. Folding it in would make energy a
     // function of how many times the page was loaded: every recompute in a deep
     // phase would subtract another 0.15, and every recompute during peak hours
     // would add another 0.10, so a pet could be pumped to hyper by refreshing.
-    let energy = (base_energy + phase.modifier()).clamp(energy::FLOOR, energy::CEILING);
+    //
+    // Scaled by focus, which is one for an archive with hours and nought for one
+    // written at every hour equally. The cut that produced `phase` names a
+    // densest four hours whether or not there is a habit to find, and swinging a
+    // pet by a quarter of its range off a peak that is arithmetic rather than
+    // evidence is the pet inventing a rhythm for somebody who has none.
+    let offset = phase.modifier() * character.focus();
+    let energy = (base_energy + offset).clamp(energy::FLOOR, energy::CEILING);
 
     PetState {
         form,
@@ -457,6 +481,7 @@ pub fn compute(posts: &[Morsel], previous: Option<&PetState>, now: i64) -> PetSt
         energy,
         level: Level::of(energy),
         phase,
+        traits: character,
         posts: visible.len(),
         sparks: spark::detect(visible, &rhythm, now),
         at: now,
@@ -615,23 +640,109 @@ mod tests {
         // stored value compounds once per recompute, so energy becomes a
         // function of traffic. Two hundred recomputes over the same minute must
         // land within rounding of one.
-        let posts = run(START, 12, "rust deploy config refactor");
-        let at = START + 12 * HOUR;
+        //
+        // Two archives, because that modifier is now scaled by a trait before it
+        // is applied. A damped offset is a smaller thing to drift by and so a
+        // better place for a drift to hide, and the second archive is one whose
+        // hours mean nothing at all.
+        for posts in [run(START, 12, "rust deploy config refactor"), scattered()] {
+            let at = posts.last().expect("posts").created_at + HOUR;
 
-        let once = compute(&posts, None, at);
+            let once = compute(&posts, None, at);
 
-        let mut state = once;
-        for _ in 0..200 {
-            state = compute(&posts, Some(&state), at);
+            let mut state = once;
+            for _ in 0..200 {
+                state = compute(&posts, Some(&state), at);
+            }
+
+            assert!(
+                (state.energy - once.energy).abs() < 1e-9,
+                "energy drifted from {} to {} after 200 recomputes",
+                once.energy,
+                state.energy
+            );
+            assert_eq!(state.level, once.level);
         }
+    }
 
+    /// An archive written at every hour of the day equally, over long enough
+    /// that the histogram has displaced the schedule the pet assumes.
+    fn scattered() -> Vec<Morsel> {
+        (0..24)
+            .map(|i| post(START + i * DAY + i * HOUR, "a note"))
+            .collect()
+    }
+
+    #[test]
+    fn a_pet_with_no_hours_is_not_swung_by_them() {
+        // `energy::phases` names a densest four hours whether or not there is a
+        // habit to find, so before focus existed this archive was handed the
+        // full ±0.10 and ±0.15 off a peak block that was arithmetic. Its pet
+        // rose and fell by a quarter of its range on the strength of nothing.
+        let posts = scattered();
+        let last = posts.last().expect("posts").created_at;
+
+        let swing = |offset: i64| {
+            let state = compute(&posts, None, last + offset);
+            (state.energy - state.base_energy).abs()
+        };
+
+        // Across a whole day, no hour may move this pet far.
+        let worst = (0..24).map(swing).fold(0.0, f64::max);
+        assert!(worst < 0.01, "an archive with no hours swung by {worst}");
+
+        // While an archive with a habit keeps every bit of the offset it had.
+        let kept: Vec<_> = (0..24)
+            .map(|day| post(START + day * DAY + 3 * HOUR, "a note"))
+            .collect();
+        let peak = compute(&kept, None, START + 24 * DAY + 3 * HOUR);
+        assert_eq!(peak.phase, Phase::Peak);
         assert!(
-            (state.energy - once.energy).abs() < 1e-9,
-            "energy drifted from {} to {} after 200 recomputes",
-            once.energy,
-            state.energy
+            (peak.energy - peak.base_energy - Phase::Peak.modifier()).abs() < 1e-9,
+            "a writer with hours is damped: {} vs {}",
+            peak.energy,
+            peak.base_energy,
         );
-        assert_eq!(state.level, once.level);
+    }
+
+    #[test]
+    fn an_essayists_pet_answers_the_essay() {
+        // What length is for. These two archives are the same archive to every
+        // other channel in the pet — same count, same rhythm, same hours, same
+        // topics — and differ only in how much was written each time. Before
+        // traits, one post was one post, so the weekly essayist's pet sat where
+        // the weekly one-liner's did and neither ever left the floor.
+        let weekly = |words: usize| -> Vec<Morsel> {
+            let body = vec!["word"; words].join(" ");
+            (0..20)
+                .map(|week| post(START + week * 7 * DAY, &body))
+                .collect()
+        };
+
+        // The last post landing on a pet that was already there, rather than a
+        // cold start — cold start applies no burst at all, which is precisely
+        // the path where nothing about length could show.
+        let landing = |posts: &[Morsel]| {
+            let last = posts.last().expect("posts").created_at;
+            let before = compute(&posts[..posts.len() - 1], None, last - HOUR);
+            compute(posts, Some(&before), last)
+        };
+
+        let essays = weekly(400);
+        let fragments = weekly(3);
+
+        let essayist = landing(&essays);
+        let one_liner = landing(&fragments);
+
+        assert_eq!(essayist.posts, one_liner.posts, "the same archive but for length");
+        assert!(
+            essayist.base_energy > one_liner.base_energy,
+            "an essay {} did no more than a fragment {}",
+            essayist.base_energy,
+            one_liner.base_energy,
+        );
+        assert_eq!(essayist.traits.labels(), ["prolix"]);
+        assert_eq!(one_liner.traits.labels(), ["terse"]);
     }
 
     #[test]

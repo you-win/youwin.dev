@@ -553,6 +553,32 @@ once there is a fortnight of data — before that a default schedule is blended 
 by how much history exists, so there is no threshold at which the pet's sense of time
 lurches.
 
+**Two traits, not the three the design names (M8).** `familiar::traits` is the slow channel:
+characteristics of the whole archive that change how the pet reacts rather than what it shows.
+Two of the three the design asks for turned out to have been built already, by machinery that
+landed after they were written down — *nocturnal* is the learned circadian profile, which moves
+a night writer's `Peak` to 03:00 by itself, and *irregular* is the decay half-life, which is
+already twice that writer's own 75th-percentile gap. Both have a passing test asserting exactly
+the behaviour the trait was to add. Nocturnal cannot be detected honestly either: measured
+against the clock it needs a timezone this site does not have, and measured against the learned
+profile it is self-defeating, because the more of an archive that lands at night the less the
+night reads as unusual.
+
+What was built is the two places the pet was still one-size-fits-all. **Length** — median words
+per post against a thirty-word note — scales the burst, because energy counted posts and never
+words, so a weekly two-thousand-word essay moved the pet exactly as far as "brb" and left the
+essayist with a pet on the floor however much they wrote. **Focus** — how much of the archive
+falls in the peak block, against how much falls in the assumed schedule's own — scales the
+circadian offset and gates the `zZ`, because `phases` names a densest four hours whether or not
+there is a habit to find, so a writer working at every hour equally was swung by a quarter of
+their range off a peak that was arithmetic.
+
+Both are ratios calibrated so an ordinary archive lands on exactly 1.0: an archive too young to
+have displaced the assumed schedule *is* that schedule and so measures as exactly as
+concentrated as it, and note-sized posts multiply the burst by one. Nothing changes behaviour on
+deploy unless it was being read wrongly the day before. Both apply continuously rather than as
+flags — the names on `/familiar` are a rounding for the page, and only departures are named.
+
 ## Authoring API — `write.youwin.dev`
 
 Caddy serves the SPA shell off disk (`try_files {path} /index.html`). axum serves JSON
@@ -982,7 +1008,7 @@ simply finishes.
 | **M5** | Polish | ✅ **Done.** FTS5 search on both surfaces, hashtags with `/t/:tag` and `/tags`, `export`, `backup` + nightly timer, `rerender`, Cloudflare purge-on-write (off unless configured). 114 tests green |
 | **M6** | The Familiar | ✅ **Done.** The whole state machine — topics, mood, energy decay and bursts, learned circadian phase, growth stages, pose triggers — plus compositional kaomoji rendering, the character sheet, and the five-minute snapshot. On the feed and at `/familiar`. 178 tests green |
 | **M7** | Mood as a field | ✅ **Done.** `posts.mood`, a picker in the composer, and `0003` backfilling the hashtags that used to carry it. Hashtags are ordinary tags again; keyword inference stays as the fallback for a post with nothing picked. 190 tests green |
-| **M8** | A familiar worth coming back to | 🚧 **In progress.** [`familiar-design.md`](familiar-design.md) is the spec, rewritten against the code and no longer a dangling reference. `familiar::baseline` landed first: sittings instead of posts, quantiles instead of means, and a decay half-life derived from the writer's own gap distribution — which fixes a pet that read every bursty writer as an absent one. Then the composer: `GET /api/familiar`, `POST /api/familiar/draft`, and a pet above the box that changes as you type. Then speech — one line, picked as the least likely true thing about the archive, in the pet's own voice on all three surfaces, and silence on an ordinary day. Then sparks — the pet's first transient: milestones that last a window instead of a single post, and a visible welcome back from a real absence. Still to come, in order: traits, a diet-shift line, the chronicle, anticipation. 261 tests green |
+| **M8** | A familiar worth coming back to | 🚧 **In progress.** [`familiar-design.md`](familiar-design.md) is the spec, rewritten against the code and no longer a dangling reference. `familiar::baseline` landed first: sittings instead of posts, quantiles instead of means, and a decay half-life derived from the writer's own gap distribution — which fixes a pet that read every bursty writer as an absent one. Then the composer: `GET /api/familiar`, `POST /api/familiar/draft`, and a pet above the box that changes as you type. Then speech — one line, picked as the least likely true thing about the archive, in the pet's own voice on all three surfaces, and silence on an ordinary day. Then sparks — the pet's first transient: milestones that last a window instead of a single post, and a visible welcome back from a real absence. Then traits — the slow channel, and two of the three the spec asked for turned out to have been built already by the baseline and the phase profile, so what landed is the two places the pet was still one-size-fits-all: what one post is worth, and whether its hours mean anything. Still to come, in order: a diet-shift line, the chronicle, anticipation. 277 tests green |
 
 The split changes the shape of the plan more than anything else: **M1 ships a complete,
 finished artifact** — a public archive at `youwin.dev` that works and is done — rather

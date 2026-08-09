@@ -65,6 +65,11 @@ pub fn widget(reading: &Reading) -> Markup {
 pub fn sheet(reading: &Reading) -> Markup {
     let state = &reading.state;
     let vitals = &reading.vitals;
+    // Departures only, so this line is absent for most archives — see
+    // `Traits::labels`. It sits with form rather than in a panel of its own
+    // because a trait is a fact about the creature above, not a measurement of
+    // the archive, and a heading over one word would make it look like one.
+    let traits = state.traits.labels();
 
     html! {
         div class="flex flex-col gap-4" {
@@ -124,6 +129,10 @@ pub fn sheet(reading: &Reading) -> Markup {
                 }
                 br;
                 "form: " (state.form.label()) " (" (state.topic.label()) ")"
+                @if !traits.is_empty() {
+                    br;
+                    "traits: " (traits.join(", "))
+                }
             }
         }
     }

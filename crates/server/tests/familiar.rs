@@ -202,6 +202,29 @@ async fn the_familiar_page_renders_the_pet_and_its_sheet(pool: SqlitePool) {
     }
 
     assert!(body.contains("<link rel=\"canonical\" href=\"https://youwin.dev/familiar\">"), "{body}");
+
+    // Twelve posts is under the sample a trait is read from, so this archive has
+    // no character yet and the line is absent rather than empty.
+    assert!(!body.contains("traits:"), "{body}");
+}
+
+#[sqlx::test]
+async fn a_character_reaches_the_page_once_there_is_one_to_read(pool: SqlitePool) {
+    // Dated backwards from the fixture epoch for the same reason the speech test
+    // is: these routes read the real clock, and posts in the future are invisible
+    // to `compute`.
+    //
+    // Twenty two-word notes, one a day, always at the same hour. Terse by a wide
+    // margin, and with hours sharp enough that nothing is said about them.
+    for day in 0..20 {
+        post_at(&pool, "a note", -(30 - day) * 24, Visibility::Public).await;
+    }
+
+    let (status, body) = get(&app(pool), "/familiar").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("traits: terse"), "{body}");
+    assert!(!body.contains("scattered"), "this archive keeps its hours: {body}");
 }
 
 #[sqlx::test]

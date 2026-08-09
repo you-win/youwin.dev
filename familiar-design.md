@@ -70,6 +70,10 @@ Five dimensions, in order of how fast they move. Implemented in
 | `Level` | energy: decay since the last post, plus bursts | frame size, motion, sleep |
 | `Phase` | this hour against the learned posting rhythm | an energy offset |
 
+Beneath the five is a slower channel, [traits](#traits--the-slow-channel), read off the whole
+archive rather than off the present. It draws nothing of its own; it changes what two of the
+five mean.
+
 **Rendering is compositional.** Eyes, mouth, crown and base are independent lookups assembled at
 draw time, so a new mood costs five table entries rather than the seven hundred hand-drawn
 kaomoji every combination would otherwise need.
@@ -302,6 +306,104 @@ whatever to say about the three weeks. Every other candidate is quiet in that mo
 silencing the return silenced the pet entirely, on what was easily the most surprising day in
 the archive. Scarcity belongs where the scarce resource is.
 
+## Traits — the slow channel
+
+*Implemented in [`familiar/traits.rs`](crates/server/src/familiar/traits.rs).*
+
+Every other channel reads the present: ten posts for mood, fifty for form, sixteen gaps for
+rhythm. A **trait** is a characteristic of the whole archive, and it changes how the pet
+*reacts* rather than what it shows. This is the part that is meant to make the creature
+yours — two people's pets behaving differently because of how they write, not merely looking
+different.
+
+It holds the invariants unchanged: still a pure function of `(posts, now)`, still nothing
+stored, still no threshold at which anything lurches.
+
+### Two of the three were already built
+
+This section originally asked for nocturnal, irregular, and laconic/prolix. Two of those had
+already been implemented by machinery that landed *after* they were written down. Recording
+that is worth more than quietly dropping them, because it is an easy mistake to repeat: a
+characteristic that sounds like a trait is very often a constant somewhere that is already
+relative to the writer.
+
+**Nocturnal** — "the pet stops sleeping at 3am and inverts its phase offsets" — is what the
+learned circadian profile does by itself. Phases are cut from the archive's own histogram, so
+somebody who only ever posts at three in the morning has 03:00 as their `Peak` within a
+fortnight, and the pet only ever sleeps in `Deep`. `energy`'s
+`the_learned_rhythm_displaces_the_assumed_one` is that assertion, already passing.
+
+Nor can it be *detected* honestly. The site is UTC and deliberately does not guess at zones,
+so nocturnal measured against the clock calls a writer eleven zones east a night owl for
+posting after breakfast. Measured against the learned profile instead, it is self-defeating:
+the more of an archive that lands at night, the less the night reads as unusual. There is no
+third option, and the invariant that says so is the one about UTC at the top of this file.
+
+**Irregular** — "it forgives longer" — is the decay half-life, which is already twice the
+writer's own 75th-percentile gap. `baseline`'s `regularity_decides_how_long_a_long_gap_is` is
+literally a test that an irregular writer is forgiven longer than a metronome with the same
+median. A trait multiplying that again would count one piece of evidence twice, which is the
+failure the tails-not-scores rule in [speech](#speech) exists to prevent.
+
+What was left is the two places the pet was still the same creature for everybody.
+
+### Length — energy counted posts and never words
+
+The burst is worth a fixed amount per post, so a weekly two-thousand-word essay moves the pet
+exactly as far as "brb" does. That is the same shape as the bug the [baseline](#rhythm--the-baseline)
+rewrite was for — an archive measured in a unit that is wrong for a whole class of writer —
+and it leaves the essayist with a pet on the floor no matter how much they write.
+
+**Length** is the archive's median words per post, against thirty. An absolute count, and the
+contrast with nocturnal is the point: an hour needs a timezone before it means anything and
+the site does not have one, while thirty words is a couple of sentences for everybody. Effort
+is sublinear in length — four times the words is not four times the sitting — so the ratio is
+taken through a square root, and it is bounded to between half and twice a note.
+
+It is a property of the *archive*, never of the post in hand. Per-post it would make one
+pasted quotation a spike, and the whole point of the slow channel is that slow things move
+slowly.
+
+**Two amplifiers, one bound.** Cadence already asks how often this writer sits down; length
+asks how much lands when they do. Alone, either can double a post's worth; together they are
+capped at three rather than four, because the two overlap — somebody who sits down once a
+week is usually also writing more each time — and a fourfold post would take a pet from the
+floor to hyper on one essay. They are not folded into cadence's own clamp, which saturates
+past a twelve-hour rhythm and would have left the trait inert for exactly the writers it was
+built for.
+
+### Focus — the phase cut had no measure of its own confidence
+
+`energy::phases` names a densest four-hour block whether or not there is a habit to find. For
+a flat histogram it names one anyway, and the writer gets the full ±0.10 and ±0.15 swings, and
+a pet that sleeps, off a peak that is arithmetic rather than evidence.
+
+**Focus** is how much of the archive falls in that block, measured against how much falls in
+the *assumed* schedule's own. Below it is the sixth of the archive that any four hours holds
+by arithmetic, which is the zero. It scales the circadian offset, and below half it also stops
+the pet drawing `zZ` — because `Deep` is only the leftovers of the cut, and for a writer who
+works at every hour equally the leftovers are not a night.
+
+The reference is what makes it safe to deploy. An archive too young to have displaced the
+prior *is* the prior, so it measures as exactly as concentrated as one and its pet keeps every
+bit of the offset it had the day before. The number then comes off the ceiling only as the
+histogram earns it.
+
+### Neutral is whatever the pet already did
+
+Both traits are ratios against a reference picked so that an ordinary archive lands on exactly
+1.0 and the arithmetic downstream is the arithmetic that was there before. A trait can bend the
+pet for a writer the machine currently mis-serves; it cannot move one that was already right.
+No archive changes behaviour on the day this ships unless it was being read wrongly the day
+before.
+
+Neither is a flag, for the same reason the circadian profile is a blend rather than a switch:
+the effect is continuous, so nothing lurches as an archive drifts across a line. The names on
+`/familiar` — *terse*, *prolix*, *scattered* — are a rounding of the number for the page, and
+only departures are named. An archive of note-sized posts at consistent hours is not "ordinary,
+punctual"; it goes unremarked on, which is the same rule speech follows and keeps the page
+clear of anything that could be read as a pole to aim for.
+
 ## What comes next
 
 None of this is built. Ordered by how much dynamism they buy per unit of code, and every one of
@@ -321,12 +423,12 @@ real and needs handling: `topics::classify` over a rolling 50-post window per st
 so this wants either an incremental classify or a daily-granularity replay cached on a longer
 TTL than the five-minute snapshot. It only changes when you post.
 
-**Traits that change behaviour.** Slow-moving characteristics read off the whole archive, which
-modify the state machine rather than decorate it. Nocturnal — a third of sittings in the learned
-deep hours — and the pet stops sleeping at 3am and inverts its phase offsets. Irregular, from a
-wide gap between the quartiles, and it forgives longer. Laconic or prolix, from word-count
-percentiles. This is what makes the creature *yours*: two people's pets should behave
-differently because of how they write, not merely look different.
+**More traits.** [Two](#traits--the-slow-channel) are built and the slot is open. The bar a
+third has to clear is the one the first two set: it must name a place the pet is still the same
+creature for everybody, rather than a second reading of something already relative to the
+writer. Sitting shape is the most promising unclaimed one — somebody who always writes in runs
+and somebody who never does are different creatures, and nothing in the pet currently knows
+which it is looking at.
 
 **Anticipation and appetite.** The learned circadian profile already knows when you write.
 During a predicted peak with nothing posted yet, the pet can be *expectant* — a nudge that only

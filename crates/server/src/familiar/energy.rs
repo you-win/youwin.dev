@@ -9,7 +9,7 @@
 use std::array;
 
 use crate::familiar::{
-    Morsel, PetState, Phase,
+    Morsel, PetState, Phase, Traits,
     baseline::{Baseline, FALLBACK_GAP_HOURS},
 };
 
@@ -88,6 +88,7 @@ const HOUR_MILLIS: i64 = 3_600_000;
 pub fn step(
     posts: &[Morsel],
     rhythm: &Baseline,
+    character: Traits,
     previous: Option<&PetState>,
     now: i64,
 ) -> f64 {
@@ -108,7 +109,8 @@ pub fn step(
     let carried = decay(previous.base_energy, hours(now - previous.at), half_life);
     let since = posts.partition_point(|post| post.created_at <= previous.at);
 
-    (carried + burst(&posts[since..], rhythm.typical_gap_hours())).clamp(FLOOR, CEILING)
+    let woken = burst(&posts[since..], rhythm.typical_gap_hours(), character.length());
+    (carried + woken).clamp(FLOOR, CEILING)
 }
 
 /// `E(t) = E₀ × 2^(-t / τ)`, floored.
@@ -132,6 +134,22 @@ fn decay(energy: f64, elapsed_hours: f64, half_life_hours: f64) -> f64 {
 const MIN_CADENCE_FACTOR: f64 = 0.5;
 const MAX_CADENCE_FACTOR: f64 = 2.0;
 
+/// Bounds on what one post can be worth once *both* amplifiers have had their
+/// say — how rarely this writer sits down, and how much they write when they do.
+///
+/// Not the cadence bounds again, and not their product either. Alone, either
+/// reason can double a post's worth; together they may not quadruple it, because
+/// the two overlap — somebody who sits down once a week is usually also writing
+/// more each time, and a fourfold post would be one essay taking the pet from
+/// the floor to hyper. Three is the admission that they are not independent
+/// without pretending they are the same reason.
+///
+/// The cadence factor saturates early — anything past a twelve-hour rhythm is
+/// already at its ceiling — so folding length into the *cadence* clamp would
+/// have left the trait inert for exactly the writers it was built for.
+const MIN_AMPLIFICATION: f64 = 0.5;
+const MAX_AMPLIFICATION: f64 = 3.0;
+
 /// The boost from posts written during one gap.
 ///
 /// Additive across posts and scaled by how far apart they are, so three notes in
@@ -148,7 +166,14 @@ const MAX_CADENCE_FACTOR: f64 = 2.0;
 /// five times every Sunday is now correctly read as the slow writer they are and
 /// their Sunday counts for the most this allows, rather than as a frantic one
 /// whose every note is unremarkable.
-fn burst(gap: &[Morsel], typical_gap_hours: f64) -> f64 {
+///
+/// `length` is the second half of the same question and comes from
+/// [`Traits`](super::Traits): the cadence factor asks how often this writer sits
+/// down, and length asks how much lands when they do. Without it the boost is a
+/// count of times the button was pressed, and an archive of weekly essays is
+/// indistinguishable from an archive of "brb" — which left the essayist with a
+/// pet on the floor no matter how much they wrote.
+fn burst(gap: &[Morsel], typical_gap_hours: f64, length: f64) -> f64 {
     if gap.is_empty() {
         return 0.0;
     }
@@ -167,12 +192,23 @@ fn burst(gap: &[Morsel], typical_gap_hours: f64) -> f64 {
 
     let cadence_factor =
         (typical_gap_hours / FALLBACK_GAP_HOURS).clamp(MIN_CADENCE_FACTOR, MAX_CADENCE_FACTOR);
-    (total * cadence_factor).min(MAX_BURST)
+    let amplification = (cadence_factor * length).clamp(MIN_AMPLIFICATION, MAX_AMPLIFICATION);
+
+    (total * amplification).min(MAX_BURST)
 }
 
 /// Which phase `now` falls in, given everything written so far.
 pub fn phase_at(posts: &[Morsel], now: i64) -> Phase {
-    phases(&profile(posts, now))[hour_of(now)]
+    phase_in(&profile(posts, now), now)
+}
+
+/// Which phase `now` falls in, against a profile already built.
+///
+/// [`super::compute`] takes this door because [`Traits`](super::Traits) needs
+/// the same curve, and two callers building their own would be two opinions
+/// about one writer's hours.
+pub fn phase_in(profile: &[f64; 24], now: i64) -> Phase {
+    phases(profile)[hour_of(now)]
 }
 
 /// The hourly posting profile the phases are cut from. Densities summing to one.
@@ -277,14 +313,19 @@ fn normalized(profile: [f64; 24]) -> [f64; 24] {
     profile.map(|density| density / total)
 }
 
-/// Cuts a profile into the five phases.
+/// The densest four-hour block: where it starts, and how much of the archive is
+/// in it.
 ///
-/// The densest four-hour block is `peak` — four because it is about the width of
-/// one sitting, and because narrower windows chase noise while wider ones stop
-/// meaning anything. Everything else is judged relative to that block's density.
-fn phases(profile: &[f64; 24]) -> [Phase; 24] {
+/// Four hours because it is about the width of one sitting, and because narrower
+/// windows chase noise while wider ones stop meaning anything.
+///
+/// A profile sums to one, so the total *is* a share — which is the whole of what
+/// [`peak_share`] returns, and the reason the search is factored out rather than
+/// written twice.
+fn peak_block(profile: &[f64; 24]) -> (usize, f64) {
     let mut best_start = 0;
     let mut best_total = f64::NEG_INFINITY;
+
     for start in 0..24 {
         let total: f64 = (0..4).map(|offset| profile[(start + offset) % 24]).sum();
         if total > best_total {
@@ -293,6 +334,36 @@ fn phases(profile: &[f64; 24]) -> [Phase; 24] {
         }
     }
 
+    (best_start, best_total)
+}
+
+/// How much of the archive falls in the block the phases are cut around.
+///
+/// Public because [`Traits`](super::Traits) measures the pet's confidence in
+/// exactly this cut: `phases` has to name a densest four hours even for a
+/// histogram that is flat, and a peak holding no more than the sixth of the day
+/// it occupies is not a habit. Reading it off the same block the phases use is
+/// what stops the confidence and the thing it is confident about from drifting
+/// apart.
+pub fn peak_share(profile: &[f64; 24]) -> f64 {
+    peak_block(profile).1
+}
+
+/// The peak share of the schedule assumed about a writer nobody has watched.
+///
+/// The reference for "keeps hours", and it makes the scale honest at both ends
+/// by construction: an archive too young to have displaced the prior *is* the
+/// prior, so it measures as exactly as concentrated as one, and its pet keeps
+/// every bit of the circadian offset it had before traits existed.
+pub fn assumed_peak_share() -> f64 {
+    peak_share(&normalized(ASSUMED_SCHEDULE))
+}
+
+/// Cuts a profile into the five phases.
+///
+/// Everything is judged relative to the density of the [`peak_block`].
+fn phases(profile: &[f64; 24]) -> [Phase; 24] {
+    let (best_start, best_total) = peak_block(profile);
     let peak_mean = best_total / 4.0;
     let is_peak = |hour: usize| (0..4).any(|offset| (best_start + offset) % 24 == hour);
 
@@ -362,6 +433,11 @@ mod tests {
         Level, compute,
         fixture::{DAY, HOUR, START, post, run},
     };
+
+    /// The length of an archive of note-sized posts — the value a young or
+    /// unremarkable archive carries, and so the one that keeps these tests about
+    /// the thing they are each testing.
+    const ORDINARY: f64 = 1.0;
 
     #[test]
     fn the_epoch_hour_is_exact_in_both_directions() {
@@ -455,14 +531,14 @@ mod tests {
             post(START + 8 * HOUR, "c"),
         ];
 
-        let tight = burst(&rapid, FALLBACK_GAP_HOURS);
-        let loose = burst(&spread, FALLBACK_GAP_HOURS);
+        let tight = burst(&rapid, FALLBACK_GAP_HOURS, ORDINARY);
+        let loose = burst(&spread, FALLBACK_GAP_HOURS, ORDINARY);
 
         assert!(tight > loose, "{tight} should beat {loose}");
-        assert!(burst(&[], FALLBACK_GAP_HOURS) == 0.0);
+        assert!(burst(&[], FALLBACK_GAP_HOURS, ORDINARY) == 0.0);
         // A single post is still worth waking up for, however long the silence
         // before it.
-        assert!(burst(&rapid[..1], FALLBACK_GAP_HOURS) > 0.15);
+        assert!(burst(&rapid[..1], FALLBACK_GAP_HOURS, ORDINARY) > 0.15);
     }
 
     #[test]
@@ -470,7 +546,9 @@ mod tests {
         let spam: Vec<_> = (0..500)
             .map(|i| post(START + i * 1_000, "more"))
             .collect();
-        assert!(burst(&spam, FALLBACK_GAP_HOURS) <= MAX_BURST);
+        assert!(burst(&spam, FALLBACK_GAP_HOURS, ORDINARY) <= MAX_BURST);
+        // And neither can length: a prolix spammer is still capped.
+        assert!(burst(&spam, 24.0, 2.0) <= MAX_BURST);
     }
 
     #[test]
@@ -480,9 +558,47 @@ mod tests {
             post(START + 5 * 60_000, "b"),
             post(START + 10 * 60_000, "c"),
         ];
-        let daily = burst(&three, 24.0);
-        let hourly = burst(&three, 1.0);
+        let daily = burst(&three, 24.0, ORDINARY);
+        let hourly = burst(&three, 1.0, ORDINARY);
         assert!(daily > hourly, "daily {daily} should beat hourly {hourly}");
+    }
+
+    #[test]
+    fn an_essayists_post_is_worth_more_than_a_fragment() {
+        // The gap traits were built for. Before length existed this was the same
+        // post whoever wrote it, so an archive of weekly essays moved the pet
+        // exactly as far as an archive of "brb" — and being weekly, it never
+        // moved far enough to leave the floor.
+        //
+        // One post rather than a sitting of them, because a daily writer's
+        // sitting of three is already against `MAX_BURST` and a cap cannot show
+        // a difference.
+        let one = [post(START, "the day's post")];
+
+        let essays = burst(&one, 24.0, 2.0);
+        let notes = burst(&one, 24.0, ORDINARY);
+        let fragments = burst(&one, 24.0, 0.5);
+
+        assert!(essays > notes, "essays {essays} should beat notes {notes}");
+        assert!(notes > fragments, "notes {notes} should beat fragments {fragments}");
+    }
+
+    #[test]
+    fn the_two_amplifiers_cannot_compound_without_limit() {
+        // Either reason alone doubles a post's worth; together they may not
+        // quadruple it, or one weekly essay would take a pet from the floor to
+        // hyper on its own.
+        let one = [post(START, "the weekly essay")];
+
+        let both = burst(&one, 168.0, 2.0);
+        let unbounded = burst(&one, 168.0, ORDINARY) * 2.0;
+        assert!(both < unbounded, "{both} should be held under {unbounded}");
+
+        // And the floor holds at the other end, so a terse writer working at
+        // speed still gets something for a post.
+        let neither = burst(&one, 1.0, 0.5);
+        assert!(neither > 0.0);
+        assert_eq!(neither, burst(&one, 1.0, ORDINARY), "the floor binds for both");
     }
 
     #[test]
