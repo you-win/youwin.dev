@@ -8,7 +8,10 @@
 
 use std::array;
 
-use crate::familiar::{Morsel, PetState, Phase};
+use crate::familiar::{
+    Morsel, PetState, Phase,
+    baseline::{Baseline, FALLBACK_GAP_HOURS},
+};
 
 /// The pet never fully dies. At the floor it is a bare `( · · )`, which is a
 /// state you can come back from; nothing renders as absent.
@@ -23,11 +26,27 @@ const COLD_START_ENERGY: f64 = 0.6;
 /// What an archive with no posts at all shows. Only ever seen by an egg.
 const EMPTY_ENERGY: f64 = 0.5;
 
-/// Cadence assumed before there is enough posting to measure one.
-const FALLBACK_CADENCE_HOURS: f64 = 6.0;
+/// Half-lives per long gap.
+///
+/// The half-life is a multiple of the gap the writer exceeds a quarter of the
+/// time (see [`Baseline::long_gap_hours`]), so at two, a silence has to run to
+/// about twice one of their longer stretches before the pet is down to half. That
+/// is roughly where a quiet spell stops looking like a quiet spell.
+const HALF_LIFE_FACTOR: f64 = 2.0;
 
-/// However fast someone posts, energy does not evaporate quicker than this.
+/// However fast someone posts, energy does not evaporate quicker than this. The
+/// shortest measurable gap between sittings is 45 minutes, so without a floor a
+/// pet could be built that visibly sagged inside one.
 const MIN_HALF_LIFE_HOURS: f64 = 2.0;
+
+/// However slowly someone posts, the pet's patience ends somewhere.
+///
+/// Without a ceiling the formula is perfectly happy to conclude that a blog with
+/// two posts a year apart is on schedule six months later, which is true and
+/// useless: nothing about that pet would ever move. A fortnight is the pet's
+/// memory. Beyond that it stops pretending, and the writers this bites are the
+/// monthly ones, who were never the audience for a creature that changes daily.
+const MAX_HALF_LIFE_HOURS: f64 = 14.0 * 24.0;
 
 /// Days over which the learned posting rhythm displaces the assumed one.
 const COLD_START_DAYS: f64 = 14.0;
@@ -51,7 +70,6 @@ const MAX_BURST: f64 = 0.7;
 const FIRST_POST_MINUTES: f64 = 1.0;
 
 const HOUR_MILLIS: i64 = 3_600_000;
-const DAY_MILLIS: i64 = 24 * HOUR_MILLIS;
 
 /// Advances energy to `now`, without any circadian offset.
 ///
@@ -68,8 +86,9 @@ pub fn step(posts: &[Morsel], previous: Option<&PetState>, now: i64) -> f64 {
         return EMPTY_ENERGY;
     };
 
-    let cadence = cadence_hours(posts, now);
-    let half_life = (cadence * 3.0).max(MIN_HALF_LIFE_HOURS);
+    let rhythm = Baseline::of(posts);
+    let half_life = (rhythm.long_gap_hours() * HALF_LIFE_FACTOR)
+        .clamp(MIN_HALF_LIFE_HOURS, MAX_HALF_LIFE_HOURS);
 
     // No previous state: a fresh process, or the first visit after a restart.
     // Estimating from the last post's age rather than starting at zero is what
@@ -81,36 +100,16 @@ pub fn step(posts: &[Morsel], previous: Option<&PetState>, now: i64) -> f64 {
     let carried = decay(previous.base_energy, hours(now - previous.at), half_life);
     let since = posts.partition_point(|post| post.created_at <= previous.at);
 
-    (carried + burst(&posts[since..], cadence)).clamp(FLOOR, CEILING)
-}
-
-/// Mean hours between posts over the last week, or [`FALLBACK_CADENCE_HOURS`].
-///
-/// A week is long enough to hold a weekday/weekend rhythm and short enough that
-/// a change in habit shows up within one. It sets the decay half-life, which is
-/// what personalizes the curve: an eight-hour gap is a normal afternoon for a
-/// daily poster and a long silence for someone who writes every two hours, and
-/// the pet should not read them the same way.
-pub fn cadence_hours(posts: &[Morsel], now: i64) -> f64 {
-    let recent = &posts[posts.partition_point(|post| post.created_at <= now - 7 * DAY_MILLIS)..];
-
-    // `[a, .., b]` matches only two elements or more, which is also exactly the
-    // condition for there being a gap to average.
-    let [first, .., last] = recent else {
-        return FALLBACK_CADENCE_HOURS;
-    };
-
-    // The mean of the gaps is the span divided by the number of gaps — no need
-    // to walk the pairs.
-    hours(last.created_at - first.created_at) / (recent.len() - 1) as f64
+    (carried + burst(&posts[since..], rhythm.typical_gap_hours())).clamp(FLOOR, CEILING)
 }
 
 /// `E(t) = E₀ × 2^(-t / τ)`, floored.
 ///
-/// Exponential because the shape is right: a two-hour gap barely registers, six
-/// hours is felt, and a day is terminal — with a long tail rather than a cliff.
-/// `τ` is three times the writer's own cadence, so the pet tolerates about three
-/// normal gaps before it visibly sags.
+/// Exponential because the shape is right: a gap the writer would not notice
+/// barely registers, a few of them are felt, and an absence is terminal — with a
+/// long tail rather than a cliff. `τ` comes from the writer's own distribution of
+/// gaps rather than from the clock, so the same curve serves someone who writes
+/// hourly and someone who writes on Sundays.
 fn decay(energy: f64, elapsed_hours: f64, half_life_hours: f64) -> f64 {
     if elapsed_hours <= 0.0 {
         return energy;
@@ -136,7 +135,12 @@ const MAX_CADENCE_FACTOR: f64 = 2.0;
 /// way — `6 / cadence`, which rewards the fast writer — against the stated
 /// intent in both its own docstring and the design's energy section. This is the
 /// version those two describe.
-fn burst(gap: &[Morsel], cadence_hours: f64) -> f64 {
+///
+/// `typical_gap_hours` is the gap between *sittings*, so the writer who posts
+/// five times every Sunday is now correctly read as the slow writer they are and
+/// their Sunday counts for the most this allows, rather than as a frantic one
+/// whose every note is unremarkable.
+fn burst(gap: &[Morsel], typical_gap_hours: f64) -> f64 {
     if gap.is_empty() {
         return 0.0;
     }
@@ -154,7 +158,7 @@ fn burst(gap: &[Morsel], cadence_hours: f64) -> f64 {
     }
 
     let cadence_factor =
-        (cadence_hours / FALLBACK_CADENCE_HOURS).clamp(MIN_CADENCE_FACTOR, MAX_CADENCE_FACTOR);
+        (typical_gap_hours / FALLBACK_GAP_HOURS).clamp(MIN_CADENCE_FACTOR, MAX_CADENCE_FACTOR);
     (total * cadence_factor).min(MAX_BURST)
 }
 
@@ -366,22 +370,64 @@ mod tests {
     }
 
     #[test]
-    fn cadence_is_measured_over_the_last_week_only() {
-        let now = START + 30 * DAY;
+    fn a_weekly_writer_is_not_mistaken_for_an_absent_one() {
+        // The regression this whole module was built for. Five notes every Sunday
+        // measured, under the old mean gap between posts, as a cadence of five
+        // minutes — a two-hour half-life, and a pet flat on the floor from Monday
+        // until the next weekend, for someone doing exactly what they always did.
+        let posts: Vec<_> = (0..8)
+            .flat_map(|week| {
+                (0..5).map(move |note| {
+                    post(START + week * 7 * DAY + 10 * HOUR + note * 5 * 60_000, "the weekly note")
+                })
+            })
+            .collect();
+        let last = posts.last().expect("posts").created_at;
 
-        // Two posts a month ago and two an hour apart yesterday: only the recent
-        // pair counts, so the cadence is an hour, not a fortnight.
-        let posts = [
-            post(START, "a"),
-            post(START + HOUR, "b"),
-            post(now - 25 * HOUR, "c"),
-            post(now - 24 * HOUR, "d"),
-        ];
-        assert!((cadence_hours(&posts, now) - 1.0).abs() < 1e-9);
+        // Midweek: quiet, but this is what their week looks like.
+        let midweek = compute(&posts, None, last + 3 * DAY + 12 * HOUR);
+        assert!(
+            midweek.base_energy > 0.30,
+            "a normal Wednesday read as {}",
+            midweek.base_energy,
+        );
 
-        // Not enough to measure falls back rather than inventing a number.
-        assert_eq!(cadence_hours(&[], now), FALLBACK_CADENCE_HOURS);
-        assert_eq!(cadence_hours(&posts[..1], now), FALLBACK_CADENCE_HOURS);
+        // Three weeks of nothing is not what their week looks like, and the same
+        // curve says so without a second rule.
+        //
+        // Read off `base_energy`, not `level`: level carries the circadian offset
+        // too, and both of these fall in the hours this archive is written in, so
+        // asserting on it would be testing the phase curve rather than the
+        // half-life this test is about.
+        let absent = compute(&posts, None, last + 21 * DAY);
+        assert!(
+            matches!(Level::of(absent.base_energy), Level::Lethargic | Level::Bored),
+            "three weeks away read as {:?} ({})",
+            Level::of(absent.base_energy),
+            absent.base_energy,
+        );
+    }
+
+    #[test]
+    fn the_half_life_is_bounded_at_both_ends() {
+        // A yearly writer is on schedule for months at a time, which is true and
+        // would leave a pet that never moved. The ceiling is what stops the
+        // formula from concluding it.
+        let yearly: Vec<_> = (0..4)
+            .map(|year| post(START + year * 365 * DAY, "the annual update"))
+            .collect();
+        let rhythm = Baseline::of(&yearly);
+        assert!(rhythm.long_gap_hours() * HALF_LIFE_FACTOR > MAX_HALF_LIFE_HOURS);
+
+        let stale = compute(&yearly, None, START + 3 * 365 * DAY + 180 * DAY);
+        assert_eq!(stale.base_energy, FLOOR, "half a year on and still going");
+
+        // And nothing posts fast enough to sag inside a single sitting.
+        let rapid: Vec<_> = (0..20)
+            .map(|i| post(START + i * 46 * 60_000, "another"))
+            .collect();
+        let tight = Baseline::of(&rapid);
+        assert!(tight.long_gap_hours() * HALF_LIFE_FACTOR < MIN_HALF_LIFE_HOURS);
     }
 
     #[test]
@@ -397,14 +443,14 @@ mod tests {
             post(START + 8 * HOUR, "c"),
         ];
 
-        let tight = burst(&rapid, FALLBACK_CADENCE_HOURS);
-        let loose = burst(&spread, FALLBACK_CADENCE_HOURS);
+        let tight = burst(&rapid, FALLBACK_GAP_HOURS);
+        let loose = burst(&spread, FALLBACK_GAP_HOURS);
 
         assert!(tight > loose, "{tight} should beat {loose}");
-        assert!(burst(&[], FALLBACK_CADENCE_HOURS) == 0.0);
+        assert!(burst(&[], FALLBACK_GAP_HOURS) == 0.0);
         // A single post is still worth waking up for, however long the silence
         // before it.
-        assert!(burst(&rapid[..1], FALLBACK_CADENCE_HOURS) > 0.15);
+        assert!(burst(&rapid[..1], FALLBACK_GAP_HOURS) > 0.15);
     }
 
     #[test]
@@ -412,7 +458,7 @@ mod tests {
         let spam: Vec<_> = (0..500)
             .map(|i| post(START + i * 1_000, "more"))
             .collect();
-        assert!(burst(&spam, FALLBACK_CADENCE_HOURS) <= MAX_BURST);
+        assert!(burst(&spam, FALLBACK_GAP_HOURS) <= MAX_BURST);
     }
 
     #[test]

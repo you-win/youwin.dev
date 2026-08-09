@@ -201,9 +201,16 @@ fn percent(share: f64) -> u8 {
     crate::familiar::stats::percent(share)
 }
 
-/// "5h", or minutes when someone is writing faster than that.
+/// "5h", in minutes when someone is writing faster than that and in days when
+/// they are writing slower.
+///
+/// The days case is not hypothetical: cadence is the gap between *sittings*, so
+/// a writer who sits down every Sunday genuinely has one of 168 hours, and
+/// printing that as `168h` would be a number nobody converts in their head.
 fn cadence(hours: f64) -> String {
-    if hours >= 1.0 {
+    if hours >= 48.0 {
+        format!("{:.0}d", hours / 24.0)
+    } else if hours >= 1.0 {
         format!("{hours:.0}h")
     } else {
         format!("{:.0}m", hours * 60.0)
@@ -258,10 +265,16 @@ mod tests {
     }
 
     #[test]
-    fn cadence_switches_to_minutes_below_an_hour() {
+    fn cadence_switches_units_at_both_ends() {
         assert_eq!(cadence(5.0), "5h");
         assert_eq!(cadence(1.0), "1h");
         assert_eq!(cadence(0.5), "30m");
+
+        // A writer who sits down once a week, which is an ordinary rhythm and
+        // not an edge case.
+        assert_eq!(cadence(47.0), "47h");
+        assert_eq!(cadence(48.0), "2d");
+        assert_eq!(cadence(168.0), "7d");
     }
 
     #[test]

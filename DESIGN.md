@@ -456,8 +456,8 @@ makes no outbound connections, which is the honest reason this stayed optional f
 ## The Familiar (M6)
 
 A kaomoji that reads the archive's temperature. It sits above the feed on page one and has
-its own page at `/familiar`. `familiar-design.md` is the specification; this is what the
-implementation does differently and why.
+its own page at `/familiar`. [`familiar-design.md`](familiar-design.md) is the specification;
+this is what the implementation does differently and why.
 
 **It has no schema and writes nothing.** Every field is a pure function of
 `(posts, previous state, now)`, so it lives happily on the public listener behind the read
@@ -482,6 +482,20 @@ bursts; `energy` is that plus the offset, computed fresh and discarded.
 more from someone who manages one a day than from someone who writes hourly. The prototype's
 `6 / cadence` rewards the fast writer, against the stated intent in both its own docstring
 and the design's energy section.
+
+**Cadence is measured between sittings, not between posts (M8).** The original measured the
+mean gap between posts over the last week, which cannot tell a weekly rhythm from abandonment:
+somebody writing five notes every Sunday measured a cadence of five minutes, got a decay
+half-life pinned to its two-hour floor, and had a pet lying flat from Monday until the next
+weekend while doing exactly what they always did. Bursty writing is what a microblog looks
+like, so this was wrong for a large share of the writers it had. Posts more than 45 minutes
+apart now start a new sitting, and `familiar::baseline` reads the rhythm off two quantiles of
+the most recent sixteen gaps between sittings — the median, and the 75th percentile the decay
+half-life is set from. Quantiles rather than a mean and a spread because the distribution is
+heavily right-skewed, and because the median absolute deviation collapses to zero for anyone
+whose gaps are mostly identical, which is most people. The half-life is clamped to a fortnight
+at the top: without it the formula concludes that a blog with two posts a year apart is on
+schedule six months later, which is true and leaves a pet that never moves.
 
 **Topic keywords match at word boundaries.** Bare substring matching fires `fn` on "often",
 `xp` on "experience" and `ecs` on "specs" — collisions that are invisible until the pet is
@@ -961,6 +975,7 @@ simply finishes.
 | **M5** | Polish | ✅ **Done.** FTS5 search on both surfaces, hashtags with `/t/:tag` and `/tags`, `export`, `backup` + nightly timer, `rerender`, Cloudflare purge-on-write (off unless configured). 114 tests green |
 | **M6** | The Familiar | ✅ **Done.** The whole state machine — topics, mood, energy decay and bursts, learned circadian phase, growth stages, pose triggers — plus compositional kaomoji rendering, the character sheet, and the five-minute snapshot. On the feed and at `/familiar`. 178 tests green |
 | **M7** | Mood as a field | ✅ **Done.** `posts.mood`, a picker in the composer, and `0003` backfilling the hashtags that used to carry it. Hashtags are ordinary tags again; keyword inference stays as the fallback for a post with nothing picked. 190 tests green |
+| **M8** | A familiar worth coming back to | 🚧 **In progress.** [`familiar-design.md`](familiar-design.md) is the spec, rewritten against the code and no longer a dangling reference. `familiar::baseline` landed first: sittings instead of posts, quantiles instead of means, and a decay half-life derived from the writer's own gap distribution — which fixes a pet that read every bursty writer as an absent one. Still to come, in order: the familiar in the composer reacting to the draft, speech ranked by surprisal, the chronicle, traits, anticipation. 218 tests green |
 
 The split changes the shape of the plan more than anything else: **M1 ships a complete,
 finished artifact** — a public archive at `youwin.dev` that works and is done — rather

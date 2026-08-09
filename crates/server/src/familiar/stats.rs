@@ -4,7 +4,7 @@
 //! of. Everything here is derived from the same posts the state machine reads,
 //! so the sheet can never disagree with the face above it.
 
-use crate::familiar::{Blend, Morsel, PetState, Topic, energy};
+use crate::familiar::{Blend, Morsel, PetState, Topic, baseline::Baseline};
 
 const DAY_MILLIS: i64 = 86_400_000;
 
@@ -36,6 +36,10 @@ pub struct Vitals {
     /// Whether that streak is still going: something was written today or
     /// yesterday. A finished streak is a fact about the past and does not burn.
     pub streak_alive: bool,
+    /// The typical gap between *sittings*, not between posts — how often this
+    /// writer sits down, which is the thing a reader means by cadence and the
+    /// thing the pet's patience is measured in. See
+    /// [`Baseline::typical_gap_hours`].
     pub cadence_hours: f64,
 }
 
@@ -91,7 +95,7 @@ pub fn vitals(posts: &[Morsel], now: i64) -> Vitals {
         words_per_post: words / posts.len().max(1),
         streak_days,
         streak_alive,
-        cadence_hours: energy::cadence_hours(posts, now),
+        cadence_hours: Baseline::of(posts).typical_gap_hours(),
     }
 }
 
@@ -150,8 +154,8 @@ fn streak(posts: &[Morsel], now: i64) -> (i64, bool) {
 }
 
 /// Whole days since the epoch, UTC. Exact for the same reason
-/// [`energy`]'s hour arithmetic is: unix time has no leap seconds and its epoch
-/// is midnight UTC.
+/// [`super::energy`]'s hour arithmetic is: unix time has no leap seconds and its
+/// epoch is midnight UTC.
 fn day_of(millis: i64) -> i64 {
     millis.div_euclid(DAY_MILLIS)
 }
