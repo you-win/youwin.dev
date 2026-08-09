@@ -6,7 +6,7 @@
 //! need. Everything here is a total function of [`PetState`] — no allocation
 //! beyond the three output lines, no ordering, no I/O.
 
-use crate::familiar::{Form, Level, Mood, PetState, Phase, Spark, Stage};
+use crate::familiar::{Form, Level, Mood, PetState, Phase, Stage};
 
 /// Weight a secondary topic needs before an adult picks up its trinket.
 ///
@@ -323,16 +323,26 @@ fn sleep(state: &PetState) -> &'static str {
 /// Three glyphs rather than one because they mean different things: `★` is the
 /// pet at its best, `*` is a round number, `✧` is the pet waking up from an
 /// absence. A shared glyph would make the rarest of the three unrecognisable.
+///
+/// **This is the only place the precedence lives.** There is one pair of corners
+/// and up to three things that could go in it, so something has to win — a
+/// milestone over a return, because crossing fifty happens once in an archive's
+/// life and there will be another chance to see a rekindling. That is a fact
+/// about corners, not about the archive, which is why [`super::spark`] reports
+/// both and this picks: `speech` ranks on its own terms and has no business
+/// inheriting a constraint on how many glyphs fit.
 fn celebration(state: &PetState) -> (&'static str, &'static str) {
     if state.stage == Stage::Adult && state.level == Level::Hyper && state.mood == Mood::Excited {
         return ("★", "★");
     }
 
-    match state.spark {
-        Some(Spark::Milestone(_)) => ("*", "*"),
-        Some(Spark::Rekindled) => ("✧", "✧"),
-        None => ("", ""),
+    if state.sparks.milestone.is_some() {
+        return ("*", "*");
     }
+    if state.sparks.rekindled {
+        return ("✧", "✧");
+    }
+    ("", "")
 }
 
 /// Visible vibration.
@@ -359,7 +369,7 @@ fn trinket(state: &PetState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::familiar::{Blend, Topic, compute, fixture::START};
+    use crate::familiar::{Blend, Sparks, Topic, compute, fixture::START};
 
     /// A state to poke holes in. Every field is set, so a test can change one
     /// and be sure it is the only thing that moved.
@@ -375,7 +385,7 @@ mod tests {
             level: Level::Active,
             phase: Phase::Active,
             posts: 60,
-            spark: None,
+            sparks: Sparks::default(),
             at: START,
         }
     }
@@ -483,15 +493,27 @@ mod tests {
     #[test]
     fn each_kind_of_spark_gets_its_own_mark() {
         let mut counting = state();
-        counting.spark = Some(Spark::Milestone(50));
+        counting.sparks = Sparks { milestone: Some(50), rekindled: false };
         assert_eq!(kaomoji(&counting).lines[0], "* ┬ ┬ *");
 
         // A return is not a round number, and reads as neither.
-        counting.spark = Some(Spark::Rekindled);
+        counting.sparks = Sparks { milestone: None, rekindled: true };
         assert_eq!(kaomoji(&counting).lines[0], "✧ ┬ ┬ ✧");
 
-        counting.spark = None;
+        counting.sparks = Sparks::default();
         assert_eq!(kaomoji(&counting).lines[0], "┬ ┬");
+    }
+
+    #[test]
+    fn the_corners_pick_one_when_both_happened() {
+        // Both are true and there is one pair of corners. The milestone takes
+        // them — but the return is still *known*, which is the whole reason the
+        // choice is made here and not where the events are found.
+        let mut both = state();
+        both.sparks = Sparks { milestone: Some(50), rekindled: true };
+
+        assert_eq!(kaomoji(&both).lines[0], "* ┬ ┬ *");
+        assert!(both.sparks.rekindled, "the return must survive not being drawn");
     }
 
     #[test]
@@ -502,7 +524,7 @@ mod tests {
         let mut loud = state();
         loud.mood = Mood::Excited;
         loud.level = Level::Hyper;
-        loud.spark = Some(Spark::Rekindled);
+        loud.sparks = Sparks { milestone: None, rekindled: true };
 
         assert_eq!(kaomoji(&loud).lines[0], "★ ┻ ┻ ★");
     }

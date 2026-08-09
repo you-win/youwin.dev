@@ -210,14 +210,21 @@ impl Familiar {
 /// *is*, and both the real read and the draft preview have to build it the same
 /// way or the two would disagree about what a post does.
 fn reading(posts: &[Morsel], previous: Option<&PetState>, now: i64) -> Reading {
-    let state = compute(posts, previous, now);
-    let vitals = stats::vitals(posts, now);
-    let diet = topics::classify(posts);
-    let moods = mood::distribution(posts);
+    // Filtered once, here, and every part below reads the same slice. `compute`
+    // filters again — it is public and has to be honest called on its own — but
+    // if the stats and the speech read the whole archive while the picture reads
+    // only what exists yet, they disagree by exactly the posts dated in the
+    // future, and the sheet ends up counting things the pet cannot see.
+    let visible = super::visible_at(posts, now);
+
+    let state = compute(visible, previous, now);
+    let vitals = stats::vitals(visible, now);
+    let diet = topics::classify(visible);
+    let moods = mood::distribution(visible);
 
     Reading {
         sheet: stats::sheet(&state, &vitals, diet),
-        speech: speech::speak(posts, &Baseline::of(posts), &state, &moods, now),
+        speech: speech::speak(visible, &Baseline::of(visible), &state, &moods, now),
         state,
         vitals,
         diet,
@@ -230,7 +237,7 @@ mod tests {
     use super::*;
     use crate::familiar::{
         Level, Stage,
-        fixture::{HOUR, START, run},
+        fixture::{HOUR, START, post, run},
     };
 
     /// The cache's query is covered by `tests/familiar.rs` against a real pool.
@@ -283,6 +290,26 @@ mod tests {
         // Recomputing clears it again.
         familiar.store(&reading_at(START + HOUR));
         assert!(!familiar.stale.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_post_from_the_future_is_invisible_to_every_part_of_a_reading() {
+        // `compute` has always filtered by `now`; the stats, the diet and the
+        // speech beside it did not, so they counted posts the picture could not
+        // see and the sheet disagreed with the creature above it by exactly the
+        // posts dated ahead. Nothing schedules posts today, which is what made
+        // this quiet — the agreement below held by fixture rather than by
+        // construction.
+        let mut posts = run(START, 12, "rust deploy config");
+        posts.push(post(START + 100 * HOUR, "not written yet"));
+
+        let held = reading(&posts, None, START + 11 * HOUR);
+
+        assert_eq!(held.state.posts, 12, "the picture sees twelve");
+        assert_eq!(
+            held.vitals.posts, held.state.posts,
+            "and so must everything drawn under it",
+        );
     }
 
     #[test]

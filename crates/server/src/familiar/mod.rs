@@ -40,7 +40,7 @@ pub mod topics;
 
 pub use baseline::Baseline;
 pub use cache::{Familiar, Reading};
-pub use spark::Spark;
+pub use spark::Sparks;
 
 /// The mood a post was written in. Owned by the crate, not by the pet — see
 /// [`crate::mood`].
@@ -400,10 +400,9 @@ pub struct PetState {
     pub level: Level,
     pub phase: Phase,
     pub posts: usize,
-    /// Something the archive did recently enough to still be showing — the one
-    /// field here that is not a steady-state reading of the present. See
-    /// [`spark`].
-    pub spark: Option<Spark>,
+    /// What the archive did recently enough to still be showing — the one field
+    /// here that is not a steady-state reading of the present. See [`spark`].
+    pub sparks: Sparks,
     /// Unix millis this state describes.
     pub at: i64,
 }
@@ -425,7 +424,7 @@ const MOOD_WINDOW: usize = 10;
 /// start: energy is estimated from the last post's age rather than carried
 /// forward, which is what happens after a restart and is meant to look the same.
 pub fn compute(posts: &[Morsel], previous: Option<&PetState>, now: i64) -> PetState {
-    let visible = &posts[..posts.partition_point(|post| post.created_at <= now)];
+    let visible = visible_at(posts, now);
 
     let blend = topics::classify(tail(visible, TOPIC_WINDOW));
     let topic = blend.primary().unwrap_or(Topic::Tech);
@@ -459,9 +458,25 @@ pub fn compute(posts: &[Morsel], previous: Option<&PetState>, now: i64) -> PetSt
         level: Level::of(energy),
         phase,
         posts: visible.len(),
-        spark: spark::detect(visible, &rhythm, now),
+        sparks: spark::detect(visible, &rhythm, now),
         at: now,
     }
+}
+
+/// The posts that exist at `now`, from a slice sorted oldest first.
+///
+/// One definition, because more than one part of a [`Reading`] has to agree
+/// about it. [`compute`] filters so it is honest called on its own, and
+/// [`cache`] filters once before handing the same slice to everything else —
+/// otherwise the numbers under the picture are counting posts the picture cannot
+/// see, and the two disagree by exactly the posts dated in the future.
+///
+/// Nothing schedules posts today, so this is insurance rather than a live
+/// concern. It is the kind that stops being insurance quietly, though: scheduled
+/// posts sit on the "deliberately not in v1" list, which is not the same list as
+/// "never".
+pub fn visible_at(posts: &[Morsel], now: i64) -> &[Morsel] {
+    &posts[..posts.partition_point(|post| post.created_at <= now)]
 }
 
 /// The last `count` posts, or all of them.

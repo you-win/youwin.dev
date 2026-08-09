@@ -72,34 +72,41 @@ const ABSENCE_MULTIPLE: f64 = 3.0;
 
 const HOUR_MILLIS: i64 = 3_600_000;
 
-/// Something the archive did recently enough that the pet is still showing it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Spark {
-    /// Crossed a round number of posts, carrying which one.
-    Milestone(usize),
+/// What the archive has done recently enough that the pet is still showing it.
+///
+/// Both at once is an ordinary case — a return that happens to be the fiftieth
+/// post — and **both are reported**. Choosing between them is a *drawing*
+/// decision, because there is one pair of corners and only one thing can go in
+/// it, and that decision belongs to the renderer.
+///
+/// It used to be made here, and putting it here was a mistake worth recording.
+/// Returning one winner meant a rekindling that coincided with a milestone
+/// simply did not exist, and [`super::speech`] gates its return line on this —
+/// so the pet drew a `*` and had nothing whatsoever to say about the three weeks
+/// it had just been away, which was the most surprising fact available to it. A
+/// constraint on the corners had quietly become a constraint on what the pet was
+/// allowed to know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Sparks {
+    /// The round number of posts just crossed, if one was.
+    pub milestone: Option<usize>,
     /// Came back from a silence longer than this writer usually keeps.
-    Rekindled,
+    pub rekindled: bool,
 }
 
-/// What the pet is still celebrating, if anything.
+/// Everything the archive has done recently enough to still be showing.
 ///
 /// `posts` must be sorted oldest first and already filtered to what is visible at
 /// `now`, which is what [`super::compute`] hands it.
-///
-/// A milestone outranks a return when both land at once — crossing fifty happens
-/// exactly once in an archive's life, and there will be another chance to see a
-/// rekindling.
-pub fn detect(posts: &[Morsel], rhythm: &Baseline, now: i64) -> Option<Spark> {
+pub fn detect(posts: &[Morsel], rhythm: &Baseline, now: i64) -> Sparks {
     let window = window_hours(rhythm);
 
-    let crossed = MILESTONES.into_iter().rev().find(|count| {
-        posts.len() >= *count && within(posts[count - 1].created_at, window, now)
-    });
-    if let Some(count) = crossed {
-        return Some(Spark::Milestone(count));
+    Sparks {
+        milestone: MILESTONES.into_iter().rev().find(|count| {
+            posts.len() >= *count && within(posts[count - 1].created_at, window, now)
+        }),
+        rekindled: rekindled(rhythm, window, now),
     }
-
-    rekindled(rhythm, window, now).then_some(Spark::Rekindled)
 }
 
 /// Whether the latest sitting ended a real absence, and is still recent.
@@ -146,9 +153,25 @@ mod tests {
         (0..days).map(|day| post(START + day * DAY, "a note")).collect()
     }
 
-    fn detect_at(posts: &[Morsel], now: i64) -> Option<Spark> {
+    fn detect_at(posts: &[Morsel], now: i64) -> Sparks {
         detect(posts, &Baseline::of(posts), now)
     }
+
+    fn milestone(count: usize) -> Sparks {
+        Sparks {
+            milestone: Some(count),
+            rekindled: false,
+        }
+    }
+
+    const REKINDLED: Sparks = Sparks {
+        milestone: None,
+        rekindled: true,
+    };
+    const NOTHING: Sparks = Sparks {
+        milestone: None,
+        rekindled: false,
+    };
 
     #[test]
     fn a_milestone_outlives_the_post_that_caused_it() {
@@ -158,18 +181,18 @@ mod tests {
         let posts = daily(51);
         let fiftieth = START + 49 * DAY;
 
-        assert_eq!(detect_at(&posts[..50], fiftieth), Some(Spark::Milestone(50)));
+        assert_eq!(detect_at(&posts[..50], fiftieth), milestone(50));
 
         // Still showing many hours after the fifty-first landed.
         let after = START + 50 * DAY + HOUR;
-        assert_eq!(detect_at(&posts, after), Some(Spark::Milestone(50)));
+        assert_eq!(detect_at(&posts, after), milestone(50));
     }
 
     #[test]
     fn a_milestone_does_expire() {
         let posts = daily(50);
         // A daily writer's window is a day, and the fiftieth post was two ago.
-        assert_eq!(detect_at(&posts, START + 51 * DAY), None);
+        assert_eq!(detect_at(&posts, START + 51 * DAY), NOTHING);
     }
 
     #[test]
@@ -180,9 +203,9 @@ mod tests {
         let fiftieth = START + 49 * HOUR;
         assert_eq!(
             detect_at(&hourly, fiftieth + 12 * HOUR),
-            Some(Spark::Milestone(50)),
+            milestone(50),
         );
-        assert_eq!(detect_at(&hourly, fiftieth + 25 * HOUR), None);
+        assert_eq!(detect_at(&hourly, fiftieth + 25 * HOUR), NOTHING);
 
         // A weekly writer still sees it when they next sit down, which is the
         // whole point of not fixing the window at a day.
@@ -190,7 +213,7 @@ mod tests {
         let fiftieth = START + 49 * 7 * DAY;
         assert_eq!(
             detect_at(&weekly, fiftieth + 6 * DAY),
-            Some(Spark::Milestone(50)),
+            milestone(50),
         );
     }
 
@@ -204,7 +227,7 @@ mod tests {
 
         assert_eq!(
             detect_at(&posts, spree + 46 * MINUTE),
-            Some(Spark::Milestone(50)),
+            milestone(50),
         );
     }
 
@@ -215,12 +238,12 @@ mod tests {
         let back = START + 19 * DAY + 21 * DAY;
         posts.push(post(back, "back at it"));
 
-        assert_eq!(detect_at(&posts, back + HOUR), Some(Spark::Rekindled));
+        assert_eq!(detect_at(&posts, back + HOUR), REKINDLED);
 
         // And the rest of that sitting does not re-trigger it — the sitting is
         // the unit, so five notes on the way back are one return.
         posts.extend((1..5).map(|i| post(back + i * MINUTE, "and another")));
-        assert_eq!(detect_at(&posts, back + 6 * MINUTE), Some(Spark::Rekindled));
+        assert_eq!(detect_at(&posts, back + 6 * MINUTE), REKINDLED);
     }
 
     #[test]
@@ -234,14 +257,14 @@ mod tests {
         let next = START + 19 * DAY + 2 * DAY;
         posts.push(post(next, "morning"));
 
-        assert_eq!(detect_at(&posts, next + HOUR), None);
+        assert_eq!(detect_at(&posts, next + HOUR), NOTHING);
 
         // Four days away, on the other hand, is a real absence for them.
         let mut posts = daily(20);
         let later = START + 19 * DAY + 4 * DAY;
         posts.push(post(later, "back"));
 
-        assert_eq!(detect_at(&posts, later + HOUR), Some(Spark::Rekindled));
+        assert_eq!(detect_at(&posts, later + HOUR), REKINDLED);
     }
 
     #[test]
@@ -257,7 +280,7 @@ mod tests {
             .collect();
         let last = erratic.last().expect("posts").created_at;
 
-        assert_eq!(detect_at(&erratic, last + HOUR), None);
+        assert_eq!(detect_at(&erratic, last + HOUR), NOTHING);
     }
 
     #[test]
@@ -269,24 +292,33 @@ mod tests {
             post(START + HOUR, "two"),
             post(START + 12 * HOUR, "three"),
         ];
-        assert_eq!(detect_at(&posts, START + 13 * HOUR), None);
+        assert_eq!(detect_at(&posts, START + 13 * HOUR), NOTHING);
     }
 
     #[test]
-    fn a_milestone_outranks_a_return() {
+    fn both_are_reported_when_both_happened() {
         // Coming back after three weeks, and it happens to be the fiftieth post.
-        // Both are true; crossing fifty happens once in a lifetime.
+        // Both are true, and this used to report only the milestone — which meant
+        // the pet had no idea it had been away, because `speech` reads this and
+        // there was nothing here to read. Choosing between them is the renderer's
+        // problem: there is one pair of corners, and speech is not drawn in them.
         let mut posts = daily(49);
         let back = START + 48 * DAY + 21 * DAY;
         posts.push(post(back, "back, and it is the fiftieth"));
 
-        assert_eq!(detect_at(&posts, back + HOUR), Some(Spark::Milestone(50)));
+        assert_eq!(
+            detect_at(&posts, back + HOUR),
+            Sparks {
+                milestone: Some(50),
+                rekindled: true,
+            },
+        );
     }
 
     #[test]
     fn an_empty_archive_sparks_at_nothing() {
-        assert_eq!(detect_at(&[], START), None);
-        assert_eq!(detect_at(&[post(START, "the first")], START + HOUR), None);
+        assert_eq!(detect_at(&[], START), NOTHING);
+        assert_eq!(detect_at(&[post(START, "the first")], START + HOUR), NOTHING);
     }
 
     #[test]
@@ -296,6 +328,6 @@ mod tests {
 
         // Read from before the post that caused it: not yet, rather than an
         // event from the future that never expires.
-        assert_eq!(detect_at(&posts, fiftieth - HOUR), None);
+        assert_eq!(detect_at(&posts, fiftieth - HOUR), NOTHING);
     }
 }

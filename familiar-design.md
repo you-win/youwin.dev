@@ -293,6 +293,15 @@ right up until it ends and then reports the ending. It is gated on the spark rat
 re-deriving the condition, so what the pet says about coming back and what it draws cannot
 disagree about whether it happened.
 
+**Detection reports every event; only the renderer chooses between them.** Both can be true at
+once — a return that happens to be the fiftieth post — and the first cut resolved that by
+returning a single winner, milestone over rekindling. That put a fact about *corners* (there is
+one pair, and only one thing fits) inside the code that decides what is *true*, and because
+speech reads the same value, a fiftieth post after three weeks away drew a `*` and had nothing
+whatever to say about the three weeks. Every other candidate is quiet in that moment, so
+silencing the return silenced the pet entirely, on what was easily the most surprising day in
+the archive. Scarcity belongs where the scarce resource is.
+
 ## What comes next
 
 None of this is built. Ordered by how much dynamism they buy per unit of code, and every one of

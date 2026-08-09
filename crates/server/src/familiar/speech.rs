@@ -30,7 +30,7 @@
 //! monopolise the line — once two candidates are both pinned at the ceiling they
 //! take turns, by the day.
 
-use crate::familiar::{Baseline, Mood, Morsel, PetState, Spark, baseline, energy};
+use crate::familiar::{Baseline, Mood, Morsel, PetState, baseline, energy};
 
 /// Surprise below which the pet says nothing.
 ///
@@ -180,8 +180,14 @@ fn silence(posts: &[Morsel], habits: &Baseline, now: i64) -> Option<Candidate> {
 /// Gated on the spark rather than re-deriving the condition, so what the pet
 /// *says* about coming back and what it *draws* can never disagree about
 /// whether it happened.
+///
+/// Note that this reads the return **directly**, not "the return, if it is the
+/// event being drawn". A milestone takes the corners when both land at once, and
+/// for a while that also silenced this line — so the pet's fiftieth post after
+/// three weeks away drew a `*` and said nothing at all about the three weeks,
+/// which was the most surprising thing it knew. Only the corners are scarce.
 fn rekindled(habits: &Baseline, state: &PetState) -> Option<Candidate> {
-    if state.spark != Some(Spark::Rekindled) {
+    if !state.sparks.rekindled {
         return None;
     }
 
@@ -493,6 +499,26 @@ mod tests {
             assert!(lowered.starts_with(char::is_alphanumeric), "{line:?}");
             assert!(line.ends_with('.'), "{line:?} is not a sentence");
         }
+    }
+
+    #[test]
+    fn a_return_is_still_worth_saying_when_it_is_also_a_milestone() {
+        // Forty-nine daily notes, three weeks away, and the post that comes back
+        // is the fiftieth. The corners can only draw one thing and the milestone
+        // takes them — but speech ranks on its own terms, and three weeks away is
+        // by a wide margin the most surprising thing about this archive.
+        //
+        // This said nothing at all until the two were untangled: every other
+        // candidate is quiet here (a one-post sitting, six words, an ordinary
+        // hour, no mood), so silencing the return silenced the pet.
+        let mut posts: Vec<_> = (0..49)
+            .map(|day| post(START + day * DAY, "a note"))
+            .collect();
+        let back = START + 48 * DAY + 21 * DAY;
+        posts.push(post(back, "back, and it is the fiftieth"));
+
+        let spoken = said(&posts, back + HOUR).expect("three weeks away is news");
+        assert!(spoken.line.contains("it stirs"), "{}", spoken.line);
     }
 
     #[test]
