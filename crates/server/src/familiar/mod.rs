@@ -347,6 +347,21 @@ impl Stage {
         }
     }
 
+    /// The stage after this one. `None` for an adult, which is the last.
+    ///
+    /// The ladder is spelled out once here rather than in each place that wants
+    /// to name what comes next — the feed widget, the character sheet and the
+    /// authoring API all ask, and three copies of an ordering is three chances
+    /// for one of them to be wrong.
+    pub fn next(self) -> Option<Self> {
+        match self {
+            Self::Egg => Some(Self::Hatchling),
+            Self::Hatchling => Some(Self::Juvenile),
+            Self::Juvenile => Some(Self::Adult),
+            Self::Adult => None,
+        }
+    }
+
     /// Posts needed to reach the next stage, and how far along this one is.
     /// `None` for an adult, which is the last one.
     pub fn progress(self, posts: usize) -> Option<(usize, u8)> {
@@ -602,5 +617,22 @@ mod tests {
         assert_eq!(Stage::Juvenile.progress(25), Some((51, 49)));
         assert_eq!(Stage::Hatchling.progress(5), Some((11, 45)));
         assert_eq!(Stage::Adult.progress(400), None);
+    }
+
+    #[test]
+    fn the_ladder_runs_out_at_exactly_the_stage_progress_does() {
+        // Two functions describing one ordering, and every caller pairs them —
+        // a stage with somewhere to go must also have a percentage to show.
+        for stage in [Stage::Egg, Stage::Hatchling, Stage::Juvenile, Stage::Adult] {
+            assert_eq!(
+                stage.next().is_some(),
+                stage.progress(0).is_some(),
+                "{stage:?} disagrees with itself",
+            );
+        }
+
+        assert_eq!(Stage::Egg.next(), Some(Stage::Hatchling));
+        assert_eq!(Stage::Juvenile.next(), Some(Stage::Adult));
+        assert_eq!(Stage::Adult.next(), None);
     }
 }

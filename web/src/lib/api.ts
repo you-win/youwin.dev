@@ -78,6 +78,37 @@ export interface Me {
   active_sessions: number;
 }
 
+/**
+ * The familiar — the kaomoji that lives on youwin.dev — as the server draws it.
+ *
+ * Every enum arrives as the same lowercase word the public site prints, so
+ * nothing here maps one vocabulary onto another and a new mood needs no matching
+ * entry on this side before it can be shown. Strings rather than unions for that
+ * reason: a value this client has never heard of should render, not fail a type
+ * check that cannot be enforced at runtime anyway.
+ */
+export interface FamiliarState {
+  /** The kaomoji, one string per line, top to bottom. */
+  lines: string[];
+  /** The picture as a sentence, for assistive technology. */
+  description: string;
+  stage: string;
+  form: string;
+  mood: string;
+  level: string;
+  phase: string;
+  topic: string;
+  posts: number;
+  /** Current energy as a percentage. */
+  energy: number;
+  streak_days: number;
+  streak_alive: boolean;
+  /** The typical gap between writing sittings, in hours. */
+  cadence_hours: number;
+  /** `null` for an adult, which has nowhere left to grow. */
+  growth: { toward: string; percent: number } | null;
+}
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -223,6 +254,23 @@ export const api = {
       "DELETE",
       `/api/posts/${encodeURIComponent(id)}`,
     ),
+
+  familiar: () => request<FamiliarState>("GET", "/api/familiar"),
+
+  /**
+   * The familiar as this draft would leave it. Changes nothing.
+   *
+   * POST because a draft is too long to put in a query string, not because
+   * anything is created. Unpostable input is not an error here — asking what a
+   * half-written note would do is not asking to publish it, and the server
+   * answers with the pet unchanged.
+   */
+  familiarDraft: (body: string, visibility: Visibility, mood: Mood | null) =>
+    request<FamiliarState>("POST", "/api/familiar/draft", {
+      body,
+      visibility,
+      mood,
+    }),
 };
 
 /** Where a post lives, or will live, on the public site. */

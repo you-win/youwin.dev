@@ -1,6 +1,7 @@
-import { createSignal, For, Show } from "solid-js";
+import { createEffect, createSignal, For, Show } from "solid-js";
 
 import { MOODS, type Mood, type Visibility } from "../lib/api";
+import type { Draft } from "./Familiar";
 
 /** Soft limit: the meter turns amber past this, but the post is still allowed. */
 const SOFT_LIMIT = 500;
@@ -39,6 +40,14 @@ interface Props {
   initialMood?: Mood | null;
   autofocus?: boolean;
   onCancel?: () => void;
+  /**
+   * Reports the contents on every change, for the familiar to react to.
+   *
+   * Published rather than rendered here: the pet is its own card above the
+   * composer, mirroring where it sits on the public feed, and a composer that
+   * knew about it could not also be the reply and edit box.
+   */
+  onDraftChange?: (draft: Draft) => void;
 }
 
 export default function Composer(props: Props) {
@@ -49,6 +58,17 @@ export default function Composer(props: Props) {
   const [error, setError] = createSignal<string | null>(null);
 
   let textarea: HTMLTextAreaElement | undefined;
+
+  // Fires on any of the three, including the reset after a successful post,
+  // which is what clears the familiar's preview rather than leaving it showing a
+  // draft that has already been published.
+  createEffect(() =>
+    props.onDraftChange?.({
+      body: body(),
+      visibility: visibility(),
+      mood: mood(),
+    }),
+  );
 
   const count = () => [...body()].length;
   const overSoft = () => count() > SOFT_LIMIT;

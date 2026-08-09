@@ -103,8 +103,10 @@ pub fn sheet(reading: &Reading) -> Markup {
 
             p class="text-sm text-secondary" {
                 (state.stage.label()) " · " (state.posts) " posts"
-                @if let Some((_, toward)) = state.stage.progress(state.posts) {
-                    " · " (toward) "% toward " (next_stage(state.stage))
+                @if let (Some((_, toward)), Some(next)) =
+                    (state.stage.progress(state.posts), state.stage.next())
+                {
+                    " · " (toward) "% toward " (next.label())
                 }
                 br;
                 "form: " (state.form.label()) " (" (state.topic.label()) ")"
@@ -223,15 +225,6 @@ fn streak(vitals: &Vitals) -> String {
         (0, _) => "—".to_owned(),
         (days, true) => format!("{days}d 🔥"),
         (days, false) => format!("{days}d"),
-    }
-}
-
-fn next_stage(stage: Stage) -> &'static str {
-    match stage {
-        Stage::Egg => "hatchling",
-        Stage::Hatchling => "juvenile",
-        Stage::Juvenile => "adult",
-        Stage::Adult => "adult",
     }
 }
 

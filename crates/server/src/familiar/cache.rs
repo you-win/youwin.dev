@@ -10,14 +10,17 @@
 //! nothing runs at all; the next visitor triggers one catch-up and sees a pet
 //! that has plainly been alone.
 
-use std::sync::{Mutex, PoisonError};
+use std::sync::{
+    Mutex, PoisonError,
+    atomic::{AtomicBool, Ordering},
+};
 
 use sqlx::SqlitePool;
 
 use crate::{
     db,
     familiar::{
-        Blend, Mood, PetState, compute, mood,
+        Blend, Mood, Morsel, PetState, compute, mood,
         stats::{self, Sheet, Vitals},
         topics,
     },
@@ -68,6 +71,12 @@ impl Reading {
 #[derive(Debug, Default)]
 pub struct Familiar {
     held: Mutex<Option<Reading>>,
+    /// Set by [`Familiar::forget`], cleared by the next recompute that lands.
+    ///
+    /// Separate from the snapshot itself because staleness and the energy the
+    /// snapshot carries are two different things, and a write invalidates only
+    /// the first. See [`Familiar::forget`].
+    stale: AtomicBool,
 }
 
 impl Familiar {
@@ -85,26 +94,85 @@ impl Familiar {
     /// most once per TTL, and the later of the two writes wins — which is why
     /// the store below refuses to move the snapshot backwards.
     pub async fn read(&self, pool: &SqlitePool, now: i64) -> Result<Reading, sqlx::Error> {
+        let stale = self.stale.load(Ordering::Relaxed);
         let previous = match self.snapshot() {
-            Some(held) if held.is_fresh(now) => return Ok(held),
+            Some(held) if !stale && held.is_fresh(now) => return Ok(held),
             held => held.map(|held| held.state),
         };
 
         let posts = db::familiar::all(pool).await?;
-        let state = compute(&posts, previous.as_ref(), now);
-        let vitals = stats::vitals(&posts, now);
-        let diet = topics::classify(&posts);
-
-        let reading = Reading {
-            sheet: stats::sheet(&state, &vitals, diet),
-            state,
-            vitals,
-            diet,
-            moods: mood::distribution(&posts),
-        };
+        let reading = reading(&posts, previous.as_ref(), now);
 
         self.store(&reading);
         Ok(reading)
+    }
+
+    /// The pet as it would be if `draft` were posted now.
+    ///
+    /// **Never stored.** A hypothetical is not a fact about the archive, and the
+    /// composer asks this question on every pause in typing — a preview that
+    /// wrote to the snapshot would leave the pet reflecting a post that was
+    /// never made, until the TTL expired or the process restarted.
+    ///
+    /// The carried state still comes from the snapshot, so this answers "what
+    /// would this do to the pet *as it is now*" rather than recomputing one from
+    /// nothing and comparing two unrelated numbers.
+    pub async fn with_draft(
+        &self,
+        pool: &SqlitePool,
+        now: i64,
+        draft: Morsel,
+    ) -> Result<Reading, sqlx::Error> {
+        let previous = self.snapshot().map(|held| held.state);
+        let mut posts = db::familiar::all(pool).await?;
+
+        // The draft lands strictly after two things, and both matter.
+        //
+        // After the carried state, or [`super::energy::step`] treats it as
+        // already seen and the preview shows none of the burst it exists to show
+        // — which happens whenever a recompute landed in this same millisecond.
+        //
+        // After the last real post, because [`compute`] binary-searches this
+        // slice and a draft appended out of order would silently cut the archive
+        // short. Nothing schedules posts, so this is insurance rather than a
+        // case that arises, and it costs one comparison.
+        let at = [
+            now,
+            previous.map_or(i64::MIN, |state| state.at + 1),
+            posts.last().map_or(i64::MIN, |post| post.created_at + 1),
+        ]
+        .into_iter()
+        .max()
+        .expect("three elements");
+
+        posts.push(Morsel {
+            created_at: at,
+            ..draft
+        });
+
+        Ok(reading(&posts, previous.as_ref(), at))
+    }
+
+    /// Marks the snapshot as needing recomputation, **without discarding the
+    /// energy it is carrying**.
+    ///
+    /// Called after a write on the authoring host, where the pet's whole job is
+    /// to show what the thing you just posted did to it — a five-minute wait for
+    /// that is the TTL doing exactly the wrong thing. The public site's own
+    /// snapshot is deliberately *not* invalidated: it is matched to the edge
+    /// cache in front of it, so recomputing early would be work for a response
+    /// Cloudflare is answering from its own copy anyway.
+    ///
+    /// The distinction between stale and absent is the whole of this method, and
+    /// it is not a nicety. Dropping the `Reading` outright hands the next read a
+    /// `previous` of `None`, which is the cold-start path — and cold start
+    /// estimates from the last post's age and applies *no burst at all*. So the
+    /// composer would preview a post as the jolt it genuinely is, the post would
+    /// land, and the pet would settle at the flat cold-start value instead. The
+    /// preview would be wrong about every post, in the one direction that makes
+    /// the feature pointless.
+    pub fn forget(&self) {
+        self.stale.store(true, Ordering::Relaxed);
     }
 
     fn snapshot(&self) -> Option<Reading> {
@@ -123,7 +191,27 @@ impl Familiar {
         // from — which decay treats as "no time passed" and quietly stalls the pet.
         if held.as_ref().is_none_or(|current| current.state.at <= reading.state.at) {
             *held = Some(reading.clone());
+            self.stale.store(false, Ordering::Relaxed);
         }
+    }
+}
+
+/// Everything both views need, from one slice of posts.
+///
+/// A free function rather than a method: it is the whole of what a [`Reading`]
+/// *is*, and both the real read and the draft preview have to build it the same
+/// way or the two would disagree about what a post does.
+fn reading(posts: &[Morsel], previous: Option<&PetState>, now: i64) -> Reading {
+    let state = compute(posts, previous, now);
+    let vitals = stats::vitals(posts, now);
+    let diet = topics::classify(posts);
+
+    Reading {
+        sheet: stats::sheet(&state, &vitals, diet),
+        state,
+        vitals,
+        diet,
+        moods: mood::distribution(posts),
     }
 }
 
@@ -139,17 +227,7 @@ mod tests {
     /// These exercise the freshness and ordering rules directly, which is the
     /// part that has edge cases.
     fn reading_at(at: i64) -> Reading {
-        let posts = run(START, 12, "rust deploy config");
-        let state = compute(&posts, None, at);
-        let vitals = stats::vitals(&posts, at);
-        let diet = topics::classify(&posts);
-        Reading {
-            sheet: stats::sheet(&state, &vitals, diet),
-            state,
-            vitals,
-            diet,
-            moods: mood::distribution(&posts),
-        }
+        reading(&run(START, 12, "rust deploy config"), None, at)
     }
 
     #[test]
@@ -174,6 +252,27 @@ mod tests {
             START + 2 * HOUR,
             "the earlier recompute must not overwrite the later one",
         );
+    }
+
+    #[test]
+    fn forgetting_expires_the_snapshot_without_throwing_away_its_energy() {
+        let familiar = Familiar::new();
+        familiar.store(&reading_at(START));
+
+        familiar.forget();
+
+        assert!(familiar.stale.load(Ordering::Relaxed), "the next read must recompute");
+
+        // And the state survives it. Dropping the Reading outright would hand
+        // the next read a `previous` of None — the cold-start path, which applies
+        // no burst — so the composer would promise every post a jolt the post
+        // itself then failed to deliver.
+        let carried = familiar.snapshot().expect("the carried state must survive");
+        assert_eq!(carried.state.at, START);
+
+        // Recomputing clears it again.
+        familiar.store(&reading_at(START + HOUR));
+        assert!(!familiar.stale.load(Ordering::Relaxed));
     }
 
     #[test]

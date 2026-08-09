@@ -152,18 +152,44 @@ Roughly what changed, energy at half of the writer's own typical gap:
 
 The weekly row is the bug. The monthly row is the deliberate limit.
 
+## The composer
+
+*Implemented in [`write/routes/familiar.rs`](crates/server/src/write/routes/familiar.rs) and
+[`Familiar.tsx`](web/src/components/Familiar.tsx).*
+
+The pet rendered on the public site — where the archive is read — and not in the authoring app,
+where the posting happens. As a reason to keep posting that is backwards: the loop closed on a
+surface the author visits occasionally. It now sits above the composer and answers the question
+the public site cannot ask, which is what the post you have not made yet would do to it.
+
+`GET /api/familiar` is the pet as it is. `POST /api/familiar/draft` takes what is in the box and
+returns `compute(posts + [draft], previous, now)` — the draft through the real markdown
+pipeline, so keyword matching sees the same plaintext a stored post would produce. The client
+holds both readings and reports the difference, because the difference is the only interesting
+thing on screen. Four hundred milliseconds of quiet before asking.
+
+**Drafts and unlisted notes preview as no change**, because that is what they are: only public
+posts feed the pet. It is a true and slightly surprising rule, and the composer is the one place
+it can be discovered beforehand rather than by watching nothing happen afterwards.
+
+**The authoring host holds its own snapshot.** Two instances of the same derived state, kept
+apart because they are invalidated by opposite things. The public one lives on the five-minute
+TTL matched to the edge cache in front of it. This one is dropped on every write — a five-minute
+wait to see what you just posted is the TTL doing exactly the wrong thing — and it answers draft
+previews, which must never be able to write a hypothetical into what the public site is serving.
+
+**Invalidating is not the same as discarding**, and this was a real bug before it was a rule.
+Dropping the held `Reading` outright hands the next read a `previous` of `None`, which is the
+cold-start path — and cold start estimates from the last post's age and applies *no burst*. So a
+draft previewed as the jolt it genuinely is, the post landed, and the pet settled at the flat
+cold-start value instead. The composer was wrong about every post, in the one direction that
+makes the feature pointless. Staleness and the carried energy are therefore separate: a write
+marks the snapshot for recomputation and leaves the state it carries alone.
+
 ## What comes next
 
 None of this is built. Ordered by how much dynamism they buy per unit of code, and every one of
 them holds the invariants above.
-
-**The familiar in the composer.** The pet renders on the public site — where the author goes
-occasionally — and not in the authoring app, where the posting happens. As a hook that is
-backwards. The version with teeth shows it beside the composer *reacting to the draft as you
-type*: `compute(posts + [draft], previous, now)`, the draft's inferred topic and mood shifting
-the blend, the face changing before you press post. It turns the pet from a dashboard you visit
-into a response to the act of writing. Costs one endpoint on the write listener and a preview
-parameter; needs no state.
 
 **Speech, ranked by surprise.** One line under the pet, and the rule is that *it says the most
 surprising true thing about you*. Score each candidate observation by its information content

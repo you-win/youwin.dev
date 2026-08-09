@@ -24,6 +24,7 @@ use crate::{
     cache::Purger,
     db::Db,
     error::AppError,
+    familiar::Familiar,
     public::assets::Assets,
 };
 
@@ -53,6 +54,17 @@ pub struct WriteState {
     /// Invalidates the public site's edge cache after a write. Disabled unless
     /// a Cloudflare zone and purge token are configured.
     pub purger: Arc<Purger>,
+    /// This host's own snapshot of the pet, deliberately **not** the public
+    /// site's.
+    ///
+    /// Two instances of the same derived state, kept apart because they are
+    /// invalidated by opposite things. The public one lives on a five-minute TTL
+    /// matched to the edge cache in front of it and never needs to be righter
+    /// than that. This one is dropped on every write, because the composer's
+    /// whole job is to show you what the post you just made did — and it answers
+    /// draft previews, which must never be able to write a hypothetical into
+    /// what the public site is serving.
+    pub familiar: Arc<Familiar>,
 }
 
 pub fn router(
@@ -69,6 +81,7 @@ pub fn router(
         assets,
         public_origin,
         purger: Arc::new(purger),
+        familiar: Arc::new(Familiar::new()),
     };
 
     // Authenticated by default. Everything reachable on this host lives in this
@@ -91,6 +104,10 @@ pub fn router(
         )
         .route("/api/drafts", get(routes::posts::drafts))
         .route("/api/search", get(routes::posts::search))
+        .route("/api/familiar", get(routes::familiar::show))
+        // POST because a draft is too long for a query string, not because
+        // anything is created. Nothing here writes.
+        .route("/api/familiar/draft", post(routes::familiar::draft))
         // HTML, not JSON — the one exception on this host. Rendered through the
         // public templates so a preview cannot drift from the published page.
         .route("/preview/{public_id}", get(routes::preview::show))

@@ -357,6 +357,7 @@ GET  /t/:tag              everything carrying one hashtag                 (M5)
 GET  /tags                every tag in use, most-used first               (M5)
 GET  /about
 GET  /familiar            the pet, at full size, with its character sheet      (M6)
+                          (the authoring host has its own pair — see M8)
 GET  /feed.xml            Atom, public roots
 ```
 
@@ -570,6 +571,12 @@ GET    /api/search?q=&cursor=         ALL visibilities, drafts included    (M5)
 POST   /api/posts         {body, parent_public_id?, visibility, mood?}
 PATCH  /api/posts/:id     {body?, visibility?, mood?}   mood: absent leaves, null clears
 DELETE /api/posts/:id                 sets deleted_at
+
+GET    /api/familiar                  the pet, as JSON                     (M8)
+POST   /api/familiar/draft {body, visibility?, mood?}                      (M8)
+                                      the pet as that draft would leave it.
+                                      POST only because a draft is too long for a
+                                      query string — nothing here writes
 
 GET    /preview/:public_id            HTML — the public templates, authenticated
 ```
@@ -975,7 +982,7 @@ simply finishes.
 | **M5** | Polish | ✅ **Done.** FTS5 search on both surfaces, hashtags with `/t/:tag` and `/tags`, `export`, `backup` + nightly timer, `rerender`, Cloudflare purge-on-write (off unless configured). 114 tests green |
 | **M6** | The Familiar | ✅ **Done.** The whole state machine — topics, mood, energy decay and bursts, learned circadian phase, growth stages, pose triggers — plus compositional kaomoji rendering, the character sheet, and the five-minute snapshot. On the feed and at `/familiar`. 178 tests green |
 | **M7** | Mood as a field | ✅ **Done.** `posts.mood`, a picker in the composer, and `0003` backfilling the hashtags that used to carry it. Hashtags are ordinary tags again; keyword inference stays as the fallback for a post with nothing picked. 190 tests green |
-| **M8** | A familiar worth coming back to | 🚧 **In progress.** [`familiar-design.md`](familiar-design.md) is the spec, rewritten against the code and no longer a dangling reference. `familiar::baseline` landed first: sittings instead of posts, quantiles instead of means, and a decay half-life derived from the writer's own gap distribution — which fixes a pet that read every bursty writer as an absent one. Still to come, in order: the familiar in the composer reacting to the draft, speech ranked by surprisal, the chronicle, traits, anticipation. 218 tests green |
+| **M8** | A familiar worth coming back to | 🚧 **In progress.** [`familiar-design.md`](familiar-design.md) is the spec, rewritten against the code and no longer a dangling reference. `familiar::baseline` landed first: sittings instead of posts, quantiles instead of means, and a decay half-life derived from the writer's own gap distribution — which fixes a pet that read every bursty writer as an absent one. Then the composer: `GET /api/familiar`, `POST /api/familiar/draft`, and a pet above the box that changes as you type. Still to come, in order: speech ranked by surprisal, the chronicle, traits, anticipation. 227 tests green |
 
 The split changes the shape of the plan more than anything else: **M1 ships a complete,
 finished artifact** — a public archive at `youwin.dev` that works and is done — rather

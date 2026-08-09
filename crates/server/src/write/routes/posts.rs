@@ -258,6 +258,7 @@ pub async fn create(
 
     tracing::info!(id = %post.public_id, visibility = post.visibility.as_str(), "created post");
     state.purger.purge_everything();
+    state.familiar.forget();
 
     // Re-read so the response carries reply_count and the stored body, matching
     // exactly what a subsequent fetch would return.
@@ -301,6 +302,7 @@ pub async fn update(
     // about which transitions matter; at a handful of writes a day, one wasted
     // purge is cheaper than that rule being subtly wrong.
     state.purger.purge_everything();
+    state.familiar.forget();
 
     Ok(Json(PostDto::from(&row)))
 }
@@ -315,6 +317,7 @@ pub async fn destroy(
 
     tracing::info!(id = %public_id, removed, "deleted post");
     state.purger.purge_everything();
+    state.familiar.forget();
 
     // `removed` exceeds 1 when a thread root took its replies with it — the
     // client shows that count so the blast radius is never a surprise.

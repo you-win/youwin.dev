@@ -1,6 +1,7 @@
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 
 import Composer from "../components/Composer";
+import Familiar, { type Draft } from "../components/Familiar";
 import PostCard from "../components/PostCard";
 import { api, type Mood, type Post, type Visibility } from "../lib/api";
 
@@ -19,6 +20,9 @@ export default function Feed() {
   const [exhausted, setExhausted] = createSignal(false);
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  const [draft, setDraft] = createSignal<Draft | null>(null);
+  /** Bumped after every write, so the familiar refetches what it is now. */
+  const [revision, setRevision] = createSignal(0);
 
   let sentinel: HTMLDivElement | undefined;
 
@@ -76,6 +80,7 @@ export default function Feed() {
     try {
       const created = await api.create(body, visibility, mood);
       setPosts((existing) => [created, ...existing]);
+      setRevision((n) => n + 1);
     } finally {
       // Rolled back on failure as well as success — the Composer keeps the text
       // and surfaces the error, so nothing is lost.
@@ -83,17 +88,26 @@ export default function Feed() {
     }
   };
 
-  const replace = (updated: Post) =>
+  // Both bump the revision: an edit can change a mood and a delete changes the
+  // count, and either moves the pet. A reply-count bump does not, but it arrives
+  // through the same callback and one wasted fetch on this host is nothing.
+  const replace = (updated: Post) => {
     setPosts((existing) =>
       existing.map((post) => (post.id === updated.id ? updated : post)),
     );
+    setRevision((n) => n + 1);
+  };
 
-  const remove = (id: string) =>
+  const remove = (id: string) => {
     setPosts((existing) => existing.filter((post) => post.id !== id));
+    setRevision((n) => n + 1);
+  };
 
   return (
     <div class="flex flex-col gap-4">
-      <Composer onSubmit={submit} />
+      <Familiar draft={draft()} revision={revision()} />
+
+      <Composer onSubmit={submit} onDraftChange={setDraft} />
 
       <For each={pending()}>
         {(item) => <PostCard post={item.post} pending />}
