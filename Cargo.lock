@@ -2913,6 +2913,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "youwin-offsite"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "youwin-server",
+]
+
+[[package]]
 name = "youwin-server"
 version = "0.1.0"
 dependencies = [

@@ -119,13 +119,30 @@ youwin.dev/
 │     ├─ lib/{api,session,pwa,outbox}.ts
 │     ├─ routes/{Feed,Permalink,Login,Drafts,Search,Settings,Moods}.tsx
 │     └─ components/{Composer,PostCard,Familiar}.tsx
+├─ crates/offsite/            # youwin-offsite — the RECEIVING end, other box (M10)
+│  ├─ tests/                  # receive.rs, plus contract.rs: the real Uploader
+│  │                          # driven at the real router
+│  └─ src/
+│     ├─ lib.rs               # why this exists rather than a WebDAV server
+│     ├─ main.rs              # thin binary: one listener, graceful shutdown
+│     ├─ config.rs            # env → Config; refuses to start with no credential
+│     ├─ name.rs              # the filename allowlist — the security boundary
+│     ├─ verify.rs            # integrity_check / JSON parse, before the rename
+│     ├─ store.rs             # write aside, sync, verify, rename, prune
+│     ├─ http.rs              # the one route, and the auth Caddy cannot do
+│     └─ refusal.rs           # why a PUT was refused, in words the sender logs
 ├─ .github/workflows/
-│  └─ deploy.yml              # build, test, ship, activate — the normal path
+│  ├─ deploy.yml              # build, test, ship, activate — the normal path
+│  └─ offsite.yml             # builds the receiver; ships nothing, holds no key
 └─ deploy/
    ├─ youwin.dev.caddy        # both blocks; installs to /etc/caddy/conf.d/
    ├─ youwin.service
    ├─ youwin-backup.{service,timer}
-   └─ activate-youwin         # the one command CI may run as root
+   ├─ activate-youwin         # the one command CI may run as root
+   └─ offsite/                # for the OTHER box — installed by hand
+      ├─ backup.youwin.dev.caddy
+      ├─ youwin-offsite.service
+      └─ README.md
 ```
 
 ## Data model
@@ -1213,6 +1230,53 @@ archive as edited because a sanitizer rule changed would be a false claim about 
 One transaction per post, so an interrupted run leaves a consistent database a second run
 simply finishes.
 
+### The receiving end (M10)
+
+The sender is incurious about what answers, and a Storage Box or an nginx with
+`dav_methods` answers fine. `crates/offsite` is what runs instead when the far end is a
+machine you own — a second box, behind Caddy at `backup.youwin.dev`, with an unrelated
+service already on it. It is a separate binary and a separate box on purpose: a backup
+that shares a process, a disk, or a deploy with the thing it protects is a second copy,
+not a backup.
+
+**It earns the choice by opening the database.** A file server stores 40MB and returns
+201; it cannot tell a `VACUUM INTO` snapshot from 40MB of zeroes, and neither can the
+sender, for whom a 2xx is the only signal there is. So every arriving `.db` goes through
+`PRAGMA integrity_check` and every `.json` is parsed *before* the rename into place. A
+failure deletes the staging file, answers 422, and turns the sending unit red — which is
+the entire point, because the alternative is discovering it on the day you need it. The
+order is **write aside, sync, verify, rename, sync the directory, prune**, so a bad
+upload cannot cost you the good copy that is already there. That path is routine, not
+exceptional: the sender retries, and a retry re-`PUT`s the same name.
+
+**One parser is the whole attack surface.** The path segment is either understood
+completely — a kind and a calendar date — or refused; nothing is sanitized. What reaches
+the filesystem is rebuilt from the parsed parts, so there is no route from request bytes
+to a path at all. The same parser decides what retention may delete, which makes the
+program structurally incapable of removing a file it could not have written — a
+hand-copied `youwin-before-the-migration.db` is not a candidate, in the same way and for
+the same reason as `backup.rs`.
+
+**Caddy does TLS, the 512MB cap, and `handle { abort }` on every other method.** What it
+cannot do is authenticate, so the service compares the whole `Authorization` header
+against `YOUWIN_OFFSITE_AUTH` — the same complete-header-value convention and the same
+variable name as the sender, so both boxes hold one string and there is nothing to
+translate. Missing is a startup failure: this listens on a name the world resolves, and
+an unauthenticated one is a public drop box. There is no health endpoint, because the
+Caddy block would abort it; the status interface is `ls -lt` and the journal, and the
+alarm is the sending box's unit going to `failed` rather than a second alarm here.
+
+**It shares this workspace, and `tests/contract.rs` is why.** Everything between the two
+halves is a wire contract, and a contract described in prose in two repos drifts. That
+test runs the real `Uploader` against the real router with a genuine snapshot of a
+genuine WAL database — which is also what would catch a SQLite upgrade changing
+`VACUUM INTO`'s output such that the verifier's `immutable` open stopped working, on a
+push rather than at 3am. It costs the workspace no new crates. It ships with no pipeline:
+CI builds it and `deploy/offsite/README.md` says how to install it by hand, because a
+deploy path that runs twice a year has rotted by the time you need it, and a deploy user
+with sudo on somebody else's box is a bigger thing to own than the twenty minutes a year
+it saves.
+
 ## Milestones
 
 | | | |
@@ -1227,6 +1291,7 @@ simply finishes.
 | **M7** | Mood as a field | ✅ **Done.** `posts.mood`, a picker in the composer, and `0003` backfilling the hashtags that used to carry it. Hashtags are ordinary tags again; keyword inference stays as the fallback for a post with nothing picked. 190 tests green |
 | **M8** | A familiar worth coming back to | 🚧 **In progress.** [`familiar-design.md`](familiar-design.md) is the spec, rewritten against the code and no longer a dangling reference. `familiar::baseline` landed first: sittings instead of posts, quantiles instead of means, and a decay half-life derived from the writer's own gap distribution — which fixes a pet that read every bursty writer as an absent one. Then the composer: `GET /api/familiar`, `POST /api/familiar/draft`, and a pet above the box that changes as you type. Then speech — one line, picked as the least likely true thing about the archive, in the pet's own voice on all three surfaces, and silence on an ordinary day. Then sparks — the pet's first transient: milestones that last a window instead of a single post, and a visible welcome back from a real absence. Then traits — the slow channel, and two of the three the spec asked for turned out to have been built already by the baseline and the phase profile, so what landed is the two places the pet was still one-size-fits-all: what one post is worth, and whether its hours mean anything. Still to come, in order: a diet-shift line, the chronicle, anticipation. 278 tests green |
 | **M9** | Ways back in, and out | ✅ **Done.** Five things the archive wanted once it was a year old rather than a week: the [date spine](#the-date-spine-m9) (`/archive`, `/archive/:year/:month`, `/on/:month/:day`) and `/random`; [off-site backup](#off-site-backup-m9) for `backup` and `export`, off unless configured; [offline composing](#offline-composing-m9) — an idempotency key on `POST /api/posts` (`0004`), a queue for posts and replies written with no signal, and composer drafts that survive a reload; and a [mood timeline](#the-mood-timeline-m9) at `/moods`, which is the first thing to read `posts.mood` other than the pet. 323 tests green |
+| **M10** | The far end of the backup | ✅ **Done.** [`youwin-offsite`](#the-receiving-end-m10) — the half M9 left to somebody else, on a second box behind Caddy at `backup.youwin.dev`. It opens every arriving snapshot and runs `PRAGMA integrity_check` *before* the rename, so a backup that went bad turns the **sending** box's unit red on the night it happened rather than on the day you need it — which is the one thing a Storage Box or an nginx with `dav_methods` structurally cannot do. One parser is the whole attack surface: a name is understood completely or refused, what reaches the disk is rebuilt from the parsed parts, and the same parser gates deletion. `tests/contract.rs` drives the real `Uploader` at the real router with a genuine `VACUUM INTO` snapshot, so the wire contract cannot drift. No pipeline: CI builds it and [`deploy/offsite/README.md`](deploy/offsite/README.md) installs it by hand. 351 tests green |
 
 The split changes the shape of the plan more than anything else: **M1 ships a complete,
 finished artifact** — a public archive at `youwin.dev` that works and is done — rather

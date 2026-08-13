@@ -759,6 +759,12 @@ that is what puts the new copy on the box in the first place:
 | `youwin-backup.service`<br>`youwin-backup.timer` | `/etc/systemd/system/` | The nightly run keeps working and keeps doing the old thing. A new `EnvironmentFile` means a variable you set in `secrets.env` is never seen — which looks exactly like not having configured it |
 | `activate-youwin` | `/usr/local/bin/` | The **next** deploy still runs the old script — see the note below |
 
+`deploy/offsite/` is **not** in that table and installs nowhere on this box. CI
+copies the whole directory into the release, so those files ride along and sit
+there inert — which is deliberate, so the receiver's runbook is on the machine
+you are already logged into when you go looking for it. Installing them belongs
+to a different box entirely; see [`offsite/README.md`](offsite/README.md).
+
 **Caddy** — validate with the token in scope and hand the log files back, both
 for the reasons spelled out in step 5c above: a plain `sudo caddy validate`
 fails on a token it cannot see, and creates root-owned log files that Caddy then
@@ -915,6 +921,21 @@ journalctl -u youwin-backup.service -n 20    # expect two "Uploaded …" lines
 whatever the target wants — rather than a token plus a scheme setting, which
 would be a second thing to configure that can only ever be wrong. Omit it
 entirely for a target that authenticates through the URL itself.
+
+**If the target is a box you own**, `youwin-offsite` is the other half of this,
+and the reason to prefer it over any of the above: it opens each arriving
+snapshot and runs `PRAGMA integrity_check` before accepting it, so a backup that
+went bad turns *this* unit red on the night it happened rather than on the day
+you need it. It lives on a different machine and is provisioned entirely
+separately — see [`deploy/offsite/README.md`](offsite/README.md). Nothing on
+this box changes except the two lines above:
+
+```
+YOUWIN_OFFSITE_URL=https://backup.youwin.dev
+```
+
+with no path on the end — the receiver answers at the root, and a trailing path
+segment gets a 400 whose body says so, on a machine you are not looking at.
 
 **A failed upload fails the unit**, unlike the cache purge, which is fire and
 forget. `systemctl status youwin-backup.service` shows non-zero and the journal

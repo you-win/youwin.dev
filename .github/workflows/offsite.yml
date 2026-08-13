@@ -1,0 +1,88 @@
+# Builds the off-site receiver and attaches it as an artifact.
+#
+# It does NOT deploy. That is the whole difference from deploy.yml, and it is
+# deliberate — see deploy/offsite/README.md. This workflow holds no SSH key and
+# no secret of any kind, which is precisely why it is allowed to build something
+# that runs on a box with an unrelated service on it.
+name: offsite
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - "crates/offsite/**"
+      - "deploy/offsite/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/offsite.yml"
+
+jobs:
+  build:
+    # Pinned for the same reason deploy.yml pins it: the glibc this builds
+    # against sets the floor for what the receiving box can run.
+    runs-on: ubuntu-24.04
+
+    env:
+      # The receiving box's glibc. Independent of deploy.yml's — this is a
+      # different machine, and it is allowed to be a different distribution.
+      # Raise it only when that box is upgraded.
+      SERVER_GLIBC: "2.41"
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-offsite-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-offsite-${{ runner.os }}-
+
+      # deploy.yml already runs the whole workspace on every push to master, so
+      # this is not the primary gate. It is here so that a `workflow_dispatch`
+      # against a branch cannot hand you a binary nothing has checked.
+      - run: cargo test --locked --package youwin-offsite
+
+      - name: Build release
+        env:
+          YOUWIN_BUILD: ${{ github.sha }}
+        run: cargo build --release --locked --package youwin-offsite
+
+      # Same assertion as the site's binary, for the same reason: glibc is the
+      # only thing tying this build to a particular machine, and a dependency
+      # bump that pulls in a newer symbol should fail here rather than at the
+      # `youwin-offsite version` you run right after scp.
+      - name: Check the binary can run on the receiving box
+        run: |
+          ldd target/release/youwin-offsite
+          needed="$(objdump -T target/release/youwin-offsite \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -uV | tail -1)"
+          echo "binary needs glibc <= $needed; the box has $SERVER_GLIBC"
+
+          highest="$(printf '%s\n%s\n' "$needed" "$SERVER_GLIBC" | sort -V | tail -1)"
+          if [ "$highest" != "$SERVER_GLIBC" ]; then
+            echo "::error::Binary requires glibc $needed but the box has $SERVER_GLIBC."
+            echo "::error::Build in a matching container instead: container: rust:1-trixie"
+            exit 1
+          fi
+
+      # The unit file and the Caddy block travel with the binary, so what you
+      # download is everything the README asks you to install — and the three
+      # always match each other.
+      - name: Assemble
+        run: |
+          mkdir -p artifact
+          cp target/release/youwin-offsite artifact/
+          cp -r deploy/offsite artifact/deploy
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: youwin-offsite-${{ github.sha }}
+          path: artifact/
+          retention-days: 90
+          if-no-files-found: error

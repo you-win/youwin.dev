@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/server"]
+# Two binaries that never run on the same machine: `youwin-server` is the site,
+# `youwin-offsite` is what receives its nightly backup on a different box. They
+# share a workspace anyway, because the thing between them is a wire contract —
+# `PUT {base}/youwin-YYYY-MM-DD.{db,json}` — and a contract with both ends in one
+# `cargo test` is one that cannot drift. See crates/offsite/src/lib.rs.
+members = ["crates/server", "crates/offsite"]
 
 [workspace.package]
 edition = "2024"

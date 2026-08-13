@@ -1,0 +1,74 @@
+# /etc/caddy/conf.d/backup.youwin.dev.caddy
+#
+# This one does NOT go on the youwin.dev server. It belongs on the box that
+# receives the nightly backup, which already has an unrelated service on it —
+# see deploy/offsite/README.md.
+#
+# Caddy does three things here that `youwin-offsite` deliberately does not:
+# TLS, the body cap, and refusing every method but PUT. What it cannot do is
+# authenticate, so the service does that itself and refuses to start without a
+# credential. Between them there is no unauthenticated path to anything.
+
+# ---------------------------------------------------------------------------
+# DELETE THIS SNIPPET if the box already defines `(hardening)` for its other
+# site. Caddy rejects a duplicate snippet definition, and it rejects the WHOLE
+# config — so a second copy of this takes the unrelated service down with it.
+# Check first:
+#
+#     grep -rn '(hardening)' /etc/caddy/
+#
+# It is reproduced here only so this file works on a box that has no such
+# snippet yet.
+# ---------------------------------------------------------------------------
+(hardening) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Cross-Origin-Opener-Policy "same-origin"
+		-Server
+	}
+}
+
+# No `tls` block, so this uses HTTP-01/TLS-ALPN with the stock Caddy binary —
+# unlike youwin.dev, which needs the caddy-dns/cloudflare module for DNS-01.
+# That is only correct while `backup.youwin.dev` stays DNS-only (grey cloud) on
+# Cloudflare, which it must for a second and much sharper reason: Cloudflare's
+# free plan caps request bodies at 100MB. Proxy this hostname and every upload
+# over 100MB is refused at the edge with a 413 that never reaches this box, and
+# the 512MB below becomes a limit that cannot be hit. See the README.
+backup.youwin.dev {
+	import hardening
+
+	# The only thing this host does. `max_size` is the first of two independent
+	# caps on the same thing — YOUWIN_OFFSITE_MAX_BYTES is the other, inside the
+	# service. They are set to the same number ON PURPOSE and must move
+	# together; raising one alone just moves which layer says no.
+	@put method PUT
+	handle @put {
+		request_body {
+			max_size 512MB
+		}
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	# Everything else: closed, with no response at all. Not a 403 — `abort` drops
+	# the connection, so this hostname does not confirm it is running anything.
+	# The service behind it answers 405 to a wrong method, which nothing outside
+	# this box will ever see.
+	handle {
+		abort
+	}
+
+	# 14 rolls rather than the 5 the youwin.dev blocks keep. This log is the only
+	# externally-visible record of what reached the receiver, and the question it
+	# gets asked — "when did uploads stop?" — is asked weeks late by definition.
+	log {
+		output file /var/log/caddy/backup.access.log {
+			roll_size 10MiB
+			roll_keep 14
+		}
+		format json
+	}
+}

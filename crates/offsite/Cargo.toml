@@ -1,0 +1,34 @@
+[package]
+name = "youwin-offsite"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Every one of these is already in Cargo.lock for youwin-server, so the receiving
+# half costs the workspace no new crates — the same property `offsite.rs` claims
+# for the sending half. sqlx is here for one statement, `PRAGMA integrity_check`,
+# which is the whole reason this is a service rather than an nginx with
+# `dav_methods`.
+[dependencies]
+anyhow = "1.0.104"
+axum = "0.8.9"
+futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
+# Only for `IgnoredAny` — the trick that validates a large export's syntax
+# without building it in memory. See `verify::export`.
+serde = "1.0.229"
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal", "net", "fs", "io-util"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
+# The sending half, so `tests/contract.rs` can drive the real `Uploader` at the
+# real receiver rather than a hand-written PUT that agrees with it by luck.
+# `migrate` is for the server's own migrations, run from this crate at a path.
+sqlx = { version = "0.9", default-features = false, features = ["migrate"] }
+tempfile = "3.27.0"
+youwin-server = { path = "../server" }

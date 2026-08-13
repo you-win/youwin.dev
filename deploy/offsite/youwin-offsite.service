@@ -1,0 +1,89 @@
+# /etc/systemd/system/youwin-offsite.service
+#
+# On the receiving box, not the youwin.dev server. See deploy/offsite/README.md.
+#
+# A long-lived listener rather than a timer, which is the opposite shape to
+# youwin-backup.service on the other end: that one wakes up, does its work, and
+# exits, and its failure is visible because a oneshot that fails goes to
+# `failed`. This one is only ever doing something for a few seconds a night, and
+# its failure mode is being up and refusing — which is why every refusal is
+# logged with a reason, and why the sending unit fails loudly when it is.
+
+[Unit]
+Description=youwin.dev off-site backup receiver
+Documentation=https://github.com/you-win/youwin.dev/blob/master/deploy/offsite/README.md
+# Caddy proxies to this, but does not depend on it: Caddy starting first and
+# briefly returning 502 is a better failure than Caddy refusing to start because
+# of this unit. The sending box retries the next night either way.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=youwin-offsite
+Group=youwin-offsite
+
+# Loopback only. Caddy is the sole thing that should ever reach this, and
+# IPAddressAllow below enforces that rather than trusting the bind address.
+Environment=YOUWIN_OFFSITE_BIND=127.0.0.1:8080
+Environment=YOUWIN_OFFSITE_DIR=/var/backups/youwin.dev
+Environment=RUST_LOG=youwin_offsite=info
+
+# YOUWIN_OFFSITE_AUTH lives here, not above — a unit file is world-readable and
+# this is the credential the whole hostname rests on. It is the SAME STRING as
+# YOUWIN_OFFSITE_AUTH in /etc/youwin/secrets.env on the sending box: a complete
+# Authorization header value, compared whole, so there is no scheme setting for
+# the two ends to disagree about.
+#
+# The service refuses to start without it. That is deliberate — this listens on
+# a name the world can resolve, and an unauthenticated one is a public drop box.
+#
+# Optional, also settable here:
+#   YOUWIN_OFFSITE_KEEP        default 90, per kind (so 90 .db and 90 .json)
+#   YOUWIN_OFFSITE_MAX_BYTES   default 536870912 — keep in step with the
+#                              `request_body max_size` in the Caddy block
+EnvironmentFile=/etc/youwin-offsite/secrets.env
+
+ExecStart=/usr/local/bin/youwin-offsite
+
+Restart=on-failure
+RestartSec=5s
+
+# 0600 on what it writes. The directory is already 0750, so this is belt and
+# braces — but the box has an unrelated service on it, and "backups of somebody
+# else's database were world-readable" is a bad sentence to have to write.
+UMask=0077
+
+# Disk budget: YOUWIN_OFFSITE_KEEP of each kind, so the steady state is
+# 90 × (snapshot + export). Retention is the only thing bounding this — there is
+# no quota check, on purpose, because a `statvfs` dependency to guess at a
+# threshold is worse than a number you can multiply. Watch it with `df` the
+# first month and lower KEEP if the archive grows faster than expected.
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/backups/youwin.dev
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+# It accepts connections and never makes one. Unlike youwin-backup.service on
+# the other box — which had to be loosened when the upload feature landed —
+# there is nothing this process legitimately dials out to, so the honest setting
+# is the strict one. If a future version ever needs to reach the network, this
+# pair is what has to change, and the comment with it.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target
