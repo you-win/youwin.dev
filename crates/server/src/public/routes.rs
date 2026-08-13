@@ -24,9 +24,10 @@ use crate::{
     render::markdown,
 };
 
-/// Posts per page. Bodies render in full, so this is a page of reading rather
-/// than a page of headlines.
-const PAGE_SIZE: i64 = 20;
+/// Posts per page, matching the batch the authoring feed loads per click.
+/// Bodies render in full, so this is a page of reading rather than a page of
+/// headlines — eight is a sitting, not a scroll.
+const PAGE_SIZE: i64 = 8;
 
 /// Entries in the Atom document.
 const FEED_ENTRIES: i64 = 20;
