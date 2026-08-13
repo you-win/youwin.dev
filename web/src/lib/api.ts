@@ -251,11 +251,13 @@ export const api = {
   logoutAll: () =>
     request<{ sessions_ended: number }>("POST", "/api/auth/logout-all"),
 
-  feed: (cursor?: string | null) =>
-    request<Page>(
-      "GET",
-      cursor ? `/api/posts?cursor=${encodeURIComponent(cursor)}` : "/api/posts",
-    ),
+  feed: (cursor?: string | null, limit?: number) => {
+    const params = new URLSearchParams();
+    if (cursor) params.set("cursor", cursor);
+    if (limit) params.set("limit", String(limit));
+    const query = params.toString();
+    return request<Page>("GET", query ? `/api/posts?${query}` : "/api/posts");
+  },
 
   drafts: () => request<Page>("GET", "/api/drafts"),
 

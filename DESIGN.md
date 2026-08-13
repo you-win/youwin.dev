@@ -784,8 +784,10 @@ per-request HTML on this origin.
 - Auth state is one `createResource` on `/api/auth/me`. The typed fetch wrapper in
   `lib/api.ts` intercepts every 401, clears that resource, and routes to `/login` — so
   no component ever handles expired sessions.
-- Feed is `createResource` with an `IntersectionObserver` sentinel for infinite scroll.
-  Infinite scroll is fine *here* — this surface isn't crawled and isn't linked into.
+- Feed loads eight posts per batch behind a "Load more" button that appends in place —
+  infinite scroll's shape, on a click instead of a scroll sentinel. Growing in place is
+  fine *here* — this surface isn't crawled and isn't linked into; the public archive
+  paginates by link instead.
 - Composer: auto-growing textarea, Ctrl/⌘+Enter to post, character meter that turns
   `warning` past the soft limit. Posting inserts optimistically and rolls back on error.
 - A "preview" affordance opens `/preview/:id` — the real public rendering, not a mimic.

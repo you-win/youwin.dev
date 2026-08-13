@@ -26,6 +26,13 @@ interface Pending {
   post: Post;
 }
 
+/**
+ * Posts fetched per batch. Eight is roughly one screenful of cards, so each
+ * "Load more" answers with about as much as was just read — enough to keep
+ * going, not enough to lose your place under.
+ */
+const BATCH_SIZE = 8;
+
 let nextKey = 0;
 
 /**
@@ -62,15 +69,13 @@ export default function Feed() {
   /** Which rejected post's text was just copied, for a moment of feedback. */
   const [copied, setCopied] = createSignal<string | null>(null);
 
-  let sentinel: HTMLDivElement | undefined;
-
   const loadMore = async () => {
     if (loading() || exhausted()) return;
 
     setLoading(true);
     setError(null);
     try {
-      const page = await api.feed(cursor());
+      const page = await api.feed(cursor(), BATCH_SIZE);
       setPosts((existing) => [...existing, ...page.posts]);
       setCursor(page.next);
       if (!page.next) setExhausted(true);
@@ -109,14 +114,6 @@ export default function Feed() {
         setRevision((n) => n + 1);
       }),
     );
-
-    // Infinite scroll is fine *here*: this surface is never crawled and never
-    // linked into. The public archive paginates by link instead.
-    const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) void loadMore();
-    });
-    if (sentinel) observer.observe(sentinel);
-    onCleanup(() => observer.disconnect());
   });
 
   const submit = async (
@@ -288,6 +285,20 @@ export default function Feed() {
         <p class="py-4 text-center text-sm text-secondary">Loading…</p>
       </Show>
 
+      {/* Growing in place is fine *here*: this surface is never crawled and
+          never linked into. The public archive paginates by link instead. A
+          click rather than a scroll sentinel, so the page ends where you
+          stopped asking — reaching the bottom is a fact, not a request. */}
+      <Show when={!exhausted() && !loading() && !error() && posts().length > 0}>
+        <button
+          type="button"
+          class="btn btn-ghost text-secondary"
+          onClick={() => void loadMore()}
+        >
+          Load more
+        </button>
+      </Show>
+
       <Show
         when={
           exhausted() &&
@@ -300,8 +311,6 @@ export default function Feed() {
           Nothing here yet. Write something.
         </p>
       </Show>
-
-      <div ref={sentinel} class="h-px" />
     </div>
   );
 }
